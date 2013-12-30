@@ -17,7 +17,7 @@
 %% @author Erlang Solutions Ltd. <openflow@erlang-solutions.com>
 %% @copyright 2012 FlowForwarding.org
 %% @doc Callback module for OpenFlow Logical Switch application.
--module(linc).
+-module(ofs_store).
 
 -behaviour(application).
 
@@ -28,11 +28,9 @@
 -export([create/1,
          delete/1,
          register/3,
-         lookup/2,
-         controllers_for_switch/2,
-         controllers_listener_for_switch/2]).
+         lookup/2]).
 
--include("linc_logger.hrl").
+-include("ofs_store_logger.hrl").
 
 %%------------------------------------------------------------------------------
 %% Application callbacks
@@ -41,7 +39,7 @@
 %% @doc Starts the application.
 -spec start(any(), any()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
-    linc_capable_sup:start_link().
+    ofs_store_sup:start_link().
 
 %% @doc Stops the application.
 -spec stop(any()) -> ok.
@@ -51,6 +49,9 @@ stop(_State) ->
 %%------------------------------------------------------------------------------
 %% Common LINC helper functions
 %%------------------------------------------------------------------------------
+
+% XXX need to flatten these tables so there is one table for all switches
+% XXX store in mnesia
 
 -spec create(integer()) -> ets:tid().
 create(SwitchId) ->
@@ -73,26 +74,3 @@ lookup(SwitchId, Name) ->
         [] ->
             undefined
     end.
-
--spec controllers_for_switch(integer(), term()) -> list(tuple()).
-controllers_for_switch(SwitchId, Config) ->
-    {switch, SwitchId, Opts} = lists:keyfind(SwitchId, 2, Config),
-    {controllers, Controllers} = lists:keyfind(controllers, 1, Opts),
-    Controllers.
-
--spec controllers_listener_for_switch(integer(), term()) -> tuple() | disabled.
-controllers_listener_for_switch(SwitchId, Config) ->
-    {switch, SwitchId, Opts} = lists:keyfind(SwitchId, 2, Config),
-    case lists:keyfind(controllers_listener, 1, Opts) of
-        {controllers_listener, ControllersListener}  ->
-            ControllersListener;
-        false ->
-            disabled
-    end.
-
-%%------------------------------------------------------------------------------
-%% Local helpers
-%%------------------------------------------------------------------------------
-
-name(SwitchId) ->
-    list_to_atom("linc_switch_" ++ integer_to_list(SwitchId)).

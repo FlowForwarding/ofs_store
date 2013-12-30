@@ -1,0 +1,9 @@
+{application, ofs_store,
+ [{description, "OpenFlow Switch Store"},
+  {vsn, "0.1"},
+  {applications, [kernel,
+                  stdlib,
+                  lager,
+                  mnesia]},
+  {mod, {ofs_store, []}},
+  {env, [{supported_versions, [4]}]}]}.

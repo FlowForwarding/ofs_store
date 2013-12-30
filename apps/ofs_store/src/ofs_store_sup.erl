@@ -17,7 +17,7 @@
 %% @author Erlang Solutions Ltd. <openflow@erlang-solutions.com>
 %% @copyright 2012 FlowForwarding.org
 %% @doc OpenFlow Logical Switch main supervisor module.
--module(linc_sup).
+-module(ofs_store_sup).
 
 -behaviour(supervisor).
 
@@ -31,18 +31,15 @@
 %% API functions
 %%------------------------------------------------------------------------------
 
--spec start_link(integer(), atom(), term()) -> {ok, pid()} | ignore | {error, term()}.
-start_link(SwitchId, BackendMod, Config) ->
-    supervisor:start_link(?MODULE, [SwitchId, BackendMod, Config]).
+-spec start_link(term()) -> {ok, pid()} | ignore | {error, term()}.
+start_link() ->
+    supervisor:start_link(?MODULE, []).
 
 %%------------------------------------------------------------------------------
 %% Supervisor callbacks
 %%------------------------------------------------------------------------------
 
-init([SwitchId, BackendMod, Config]) ->
-    linc:create(SwitchId),
-    linc:register(SwitchId, linc_sup, self()),
-    Logic = {linc_logic, {linc_logic, start_link, [SwitchId, BackendMod,
-                                                   [], Config]},
+init([]) ->
+    Logic = {ofs_store_logic, {ofs_store_logic, start_link, []},
              permanent, 5000, worker, [linc_logic]},
     {ok, {{one_for_all, 5, 10}, [Logic]}}.
