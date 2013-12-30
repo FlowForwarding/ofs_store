@@ -1,5 +1,0 @@
-#!/bin/sh
-
-if [ `uname` = Linux -a `id -u` != 0 ]; then
-    sudo -n setcap cap_net_admin=ep ./rel/linc/erts-*/bin/beam.smp
-fi
