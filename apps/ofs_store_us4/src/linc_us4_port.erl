@@ -25,6 +25,7 @@
 %% stopped by utilizing API provided by this module.
 -module(linc_us4_port).
 
+% XXX no longer a gen_server -- need to rewrite this so port information is stored in a table.
 -behaviour(gen_server).
 
 %% Port API
@@ -49,7 +50,7 @@
 -include_lib("of_config/include/of_config.hrl").
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
--include_lib("linc/include/linc_logger.hrl").
+-include_lib("linc/include/ofs_store_logger.hrl").
 -include("linc_us4.hrl").
 -include("linc_us4_port.hrl").
 
@@ -77,33 +78,13 @@ initialize(SwitchId, Config) ->
     LincPorts = ets:new(linc_ports, [public,
                                      {keypos, #linc_port.port_no},
                                      {read_concurrency, true}]),
-    LincPortStats = ets:new(linc_port_stats,
-                            [public,
-                             {keypos, #ofp_port_stats.port_no},
-                             {read_concurrency, true}]),
     linc:register(SwitchId, linc_ports, LincPorts),
-    linc:register(SwitchId, linc_port_stats, LincPortStats),
-    case queues_enabled(SwitchId) of
-        true ->
-            linc_us4_queue:initialize(SwitchId);
-        false ->
-            ok
-    end,
-    UserspacePorts = ports_for_switch(SwitchId, Config),
-    [add(physical, SwitchId, Port) || Port <- UserspacePorts],
     ok.
 
 -spec terminate(integer()) -> ok.
 terminate(SwitchId) ->
     [ok = remove(SwitchId, PortNo) || PortNo <- get_all_port_no(SwitchId)],
-    true = ets:delete(linc:lookup(SwitchId, linc_ports)),
-    true = ets:delete(linc:lookup(SwitchId, linc_port_stats)),
-    case queues_enabled(SwitchId) of
-        true ->
-            linc_us4_queue:terminate(SwitchId);
-        false ->
-            ok
-    end.
+    true = ets:delete(linc:lookup(SwitchId, linc_ports)).
 
 %% @doc Change config of the given OF port according to the provided port mod.
 -spec modify(integer(), ofp_port_mod()) -> ok |
@@ -119,61 +100,6 @@ modify(SwitchId, #ofp_port_mod{port_no = PortNo} = PortMod) ->
             gen_server:call(Pid, {port_mod, PortMod})
     end.
 
-%% @doc Send OF packet to the OF port.
--spec send(linc_pkt(), ofp_port_no()) -> ok | bad_port | bad_queue | no_fwd.
-send(#linc_pkt{in_port = InPort} = Pkt, in_port) ->
-    send(Pkt, InPort);
-send(#linc_pkt{} = Pkt, table) ->
-    linc_us4_routing:spawn_route(Pkt),
-    ok;
-send(#linc_pkt{}, normal) ->
-    %% Normal port represents traditional non-OpenFlow pipeline of the switch
-    %% not supprted by LINC
-    bad_port;
-send(#linc_pkt{} = Pkt, flood) ->
-    %% Flood port represents traditional non-OpenFlow pipeline of the switch
-    %% and should not be supported by LINC. But we want LINC to cooperate with
-    %% NOX 1.3 controller [1] that uses this port, incorrectly assuming that
-    %% an OpenFlow switch supports it. It's important as NOX is shipped
-    %% with Mininet [3]. As soon as this bug is fixed [2]
-    %% this function call will return 'bad_port'.
-    %% [1]: https://github.com/CPqD/nox13oflib
-    %% [2]: https://github.com/CPqD/nox13oflib/issues/3
-    %% [3]: http://mininet.org/
-    send(Pkt, all);
-send(#linc_pkt{in_port = InPort, switch_id = SwitchId} = Pkt, all) ->
-    [send(Pkt, PortNo) || PortNo <- get_all_port_no(SwitchId), PortNo /= InPort],
-    ok;
-send(#linc_pkt{no_packet_in = true}, controller) ->
-    %% Drop packets which originate from port with no_packet_in config flag set
-    ok;
-send(#linc_pkt{no_packet_in = false, fields = Fields, packet = Packet,
-               table_id = TableId, packet_in_reason = Reason,
-               packet_in_bytes = Bytes, cookie = Cookie,
-               switch_id = SwitchId},
-     controller) ->
-    {BufferId,Data} = maybe_buffer(SwitchId, Reason, Packet, Bytes),
-    PacketIn = #ofp_packet_in{buffer_id = BufferId, reason = Reason,
-                              table_id = TableId, cookie = Cookie,
-                              match = Fields, data = Data},
-    linc_logic:send_to_controllers(SwitchId, #ofp_message{body = PacketIn}),
-    ok;
-send(#linc_pkt{}, local) ->
-    ?WARNING("Unsupported port type: local", []),
-    bad_port;
-send(#linc_pkt{}, any) ->
-    %% Special value used in some OpenFlow commands when no port is specified
-    %% (port wildcarded).
-    %% Can not be used as an ingress port nor as an output port.
-    bad_port;
-send(#linc_pkt{switch_id = SwitchId} = Pkt, PortNo) when is_integer(PortNo) ->
-    case get_port_pid(SwitchId, PortNo) of
-        {error, _} ->
-            bad_port;
-        Pid ->
-            gen_server:cast(Pid, {send, Pkt})
-    end.
-
 %% @doc Return list of all OFP ports present in the switch.
 -spec get_desc(integer()) -> ofp_port_desc_reply().
 get_desc(SwitchId) ->
@@ -182,20 +108,6 @@ get_desc(SwitchId) ->
                           [Port | Ports]
                   end, [], linc:lookup(SwitchId, linc_ports)),
     #ofp_port_desc_reply{body = L}.
-
-%% @doc Return port stats record for the given OF port.
--spec get_stats(integer(), ofp_port_stats_request()) -> ofp_port_stats_reply() |
-                                                        ofp_error_msg().
-get_stats(SwitchId, #ofp_port_stats_request{port_no = any}) ->
-    PortStats = ets:tab2list(linc:lookup(SwitchId, linc_port_stats)),
-    #ofp_port_stats_reply{body = convert_duration(PortStats)};
-get_stats(SwitchId, #ofp_port_stats_request{port_no = PortNo}) ->
-    case ets:lookup(linc:lookup(SwitchId, linc_port_stats), PortNo) of
-        [] ->
-            #ofp_error_msg{type = bad_request, code = bad_port};
-        [#ofp_port_stats{}] = PortStats ->
-            #ofp_port_stats_reply{body = convert_duration(PortStats)}
-    end.
 
 -spec get_state(integer(), ofp_port_no()) -> [ofp_port_state()].
 get_state(SwitchId, PortNo) ->
@@ -461,67 +373,13 @@ handle_call(get_info, _From, #state{resource_id = ResourceId,
     {reply, {ResourceId, Port}, State}.
 
 %% @private
-handle_cast({send, #linc_pkt{packet = Packet, queue_id = QueueId}},
-            #state{socket = Socket,
-                   port = #ofp_port{port_no = PortNo,
-                                    config = PortConfig},
-                   erlang_port = Port,
-                   queues = QueuesState,
-                   ifindex = Ifindex,
-                   switch_id = SwitchId} = State) ->
-    case check_port_config(no_fwd, PortConfig) of
-        true ->
-            drop;
-        false ->
-            Frame = pkt:encapsulate(Packet),
-            update_port_tx_counters(SwitchId, PortNo, byte_size(Frame)),
-            case QueuesState of
-                disabled ->
-                    case {Port, Ifindex} of
-                        {undefined, _} ->
-                            linc_us4_port_native:send(Socket, Ifindex, Frame);
-                        {_, undefined} ->
-                            port_command(Port, Frame)
-                    end;
-                enabled ->
-                    linc_us4_queue:send(SwitchId, PortNo, QueueId, Frame)
-            end
-    end,
-    {noreply, State}.
-
-%% @private
-handle_info({packet, _DataLinkType, _Time, _Length, Frame},
-            #state{port = #ofp_port{port_no = PortNo,
-                                    config = PortConfig},
-                   switch_id = SwitchId} = State) ->
-    handle_frame(Frame, SwitchId, PortNo, PortConfig),
-    {noreply, State};
-handle_info({Port, {data, Frame}}, #state{port = #ofp_port{port_no = PortNo,
-                                                           config = PortConfig},
-                                          erlang_port = Port,
-                                          switch_id = SwitchId} = State) ->
-    handle_frame(Frame, SwitchId, PortNo, PortConfig),
-    {noreply, State};
-handle_info({'EXIT', _Pid, {port_terminated, 1}},
-            #state{interface = Interface} = State) ->
-    ?ERROR("Port for interface ~p exited abnormally",
-           [Interface]),
-    {stop, normal, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
 %% @private
 terminate(_Reason, #state{port = #ofp_port{port_no = PortNo},
                           switch_id = SwitchId} = State) ->
-    case queues_enabled(SwitchId) of
-        true ->
-            linc_us4_queue:detach_all(SwitchId, PortNo);
-        false ->
-            ok
-    end,
-    true = ets:delete(linc:lookup(SwitchId, linc_ports), PortNo),
-    true = ets:delete(linc:lookup(SwitchId, linc_port_stats), PortNo),
-    linc_us4_port_native:close(State).
+    true = ets:delete(linc:lookup(SwitchId, linc_ports), PortNo).
 
 %% @private
 code_change(_OldVsn, State, _Extra) ->
@@ -562,33 +420,6 @@ remove(SwitchId, PortNo) ->
             ok = supervisor:terminate_child(Sup, Pid)
     end.
 
-handle_frame(Frame, SwitchId, PortNo, PortConfig) ->
-    case check_port_config(no_recv, PortConfig) of
-        true ->
-            drop;
-        false ->
-            LincPkt = linc_us4_packet:binary_to_record(Frame, SwitchId, PortNo),
-            update_port_rx_counters(SwitchId, PortNo, byte_size(Frame)),
-            case check_port_config(no_packet_in, PortConfig) of
-                false ->
-                    linc_us4_routing:spawn_route(LincPkt);
-                true ->
-                    linc_us4_routing:spawn_route(LincPkt#linc_pkt{no_packet_in = true})
-            end
-    end.
-
--spec update_port_rx_counters(integer(), integer(), integer()) -> any().
-update_port_rx_counters(SwitchId, PortNum, Bytes) ->
-    ets:update_counter(linc:lookup(SwitchId, linc_port_stats), PortNum,
-                       [{#ofp_port_stats.rx_packets, 1},
-                        {#ofp_port_stats.rx_bytes, Bytes}]).
-
--spec update_port_tx_counters(integer(), integer(), integer()) -> any().
-update_port_tx_counters(SwitchId, PortNum, Bytes) ->
-    ets:update_counter(linc:lookup(SwitchId, linc_port_stats), PortNum,
-                       [{#ofp_port_stats.tx_packets, 1},
-                        {#ofp_port_stats.tx_bytes, Bytes}]).
-
 -spec get_port_pid(integer(), ofp_port_no()) -> pid() | {error, invalid | nonexistent}.
 get_port_pid(_SwitchId, PortNo) when is_atom(PortNo); PortNo > ?OFPP_MAX ->
     {error, invalid};
@@ -598,66 +429,6 @@ get_port_pid(SwitchId, PortNo) ->
             {error, nonexistent};
         [#linc_port{pid = Pid}] ->
             Pid
-    end.
-
--spec convert_duration(list(#ofp_port_stats{})) -> list(#ofp_port_stats{}).
-convert_duration(PortStatsList) ->
-    lists:map(fun(#ofp_port_stats{duration_sec = DSec} = PortStats) ->
-                      MicroDuration = timer:now_diff(erlang:now(), DSec),
-                      Sec = microsec_to_sec(MicroDuration),
-                      NSec = microsec_to_nsec(MicroDuration),
-                      PortStats#ofp_port_stats{duration_sec = Sec,
-                                               duration_nsec = NSec}
-              end, PortStatsList).
-
-microsec_to_sec(Micro) ->
-    Micro div 1000000.
-
-microsec_to_nsec(Micro) ->
-    (Micro rem 1000000) * 1000.
-
-maybe_buffer(_SwitchId, action, Packet, no_buffer) ->
-    {no_buffer,pkt:encapsulate(Packet)};
-maybe_buffer(SwitchId, action, Packet, Bytes) ->
-    maybe_buffer(SwitchId, Packet, Bytes);
-maybe_buffer(SwitchId, no_match, Packet, _Bytes) ->
-    maybe_buffer(SwitchId, Packet, get_switch_config(miss_send_len));
-maybe_buffer(SwitchId, invalid_ttl, Packet, _Bytes) ->
-    %% The spec does not specify how many bytes to include for invalid_ttl,
-    %% so we use miss_send_len here as well.
-    maybe_buffer(SwitchId, Packet, get_switch_config(miss_send_len)).
-
-maybe_buffer(_SwitchId, Packet, no_buffer) ->
-    {no_buffer, pkt:encapsulate(Packet)};
-maybe_buffer(SwitchId, Packet, Bytes) ->
-    BufferId = linc_buffer:save_buffer(SwitchId, Packet),
-    {BufferId, truncate_packet(Packet,Bytes)}.
-
-truncate_packet(Packet,Bytes) ->
-    Bin = pkt:encapsulate(Packet),
-    case byte_size(Bin) > Bytes of
-        true ->
-            <<Head:Bytes/bytes, _/binary>> = Bin,
-            Head;
-        false ->
-            Bin
-    end.
-
-get_switch_config(miss_send_len) ->
-    %%TODO: get this from the switch configuration
-    no_buffer.
-
--spec queues_enabled(integer()) -> boolean().
-queues_enabled(SwitchId) ->
-    {ok, Switches} = application:get_env(linc, logical_switches),
-    {switch, SwitchId, Opts} = lists:keyfind(SwitchId, 2, Switches),
-    case lists:keyfind(queues_status, 1, Opts) of
-        false ->
-            false;
-        {queues_status, enabled} ->
-            true;
-        _ ->
-            false
     end.
 
 -spec queues_config(integer(), list(linc_port_config())) -> [term()] |
@@ -674,15 +445,3 @@ queues_config(SwitchId, PortOpts) ->
         false ->
             disabled
     end.
-
-ports_for_switch(SwitchId, Config) ->
-    {switch, SwitchId, Opts} = lists:keyfind(SwitchId, 2, Config),
-    {ports, Ports} = lists:keyfind(ports, 1, Opts),
-    QueuesStatus = lists:keyfind(queues_status, 1, Opts),
-    Queues = lists:keyfind(queues, 1, Opts),
-    [begin
-         {port, PortNo, [QueuesStatus | [Queues | PortConfig]]}
-     end || {port, PortNo, PortConfig} <- Ports].
-
-check_port_config(Flag, Config) ->
-    lists:member(port_down, Config) orelse lists:member(Flag, Config).

@@ -19,13 +19,13 @@
 %% @doc Module for handling per-flow meters.
 -module(linc_us4_meter).
 
+% XXX rewrite so this is no longer a gen_server.  config should be in a table
 -behaviour(gen_server).
 
 %% API
 -export([modify/2,
          apply/3,
          update_flow_count/3,
-         get_stats/2,
          get_config/2,
          get_features/0,
          is_valid/2]).
@@ -155,23 +155,6 @@ apply(SwitchId, Id, Pkt) ->
             drop;
         Pid ->
             gen_server:call(Pid, {apply, Pkt})
-    end.
-
-%% @doc Get meter statistics.
--spec get_stats(integer(), integer() | all) ->
-                       Reply :: #ofp_meter_stats_reply{}.
-get_stats(SwitchId, all) ->
-    TId = linc:lookup(SwitchId, linc_meter_ets),
-    Meters = [gen_server:call(Pid, get_state)
-              || {_, Pid} <- lists:keysort(1, ets:tab2list(TId))],
-    #ofp_meter_stats_reply{body = [export_stats(Meter) || Meter <- Meters]};
-get_stats(SwitchId, Id) when is_integer(Id) ->
-    case get_meter_pid(SwitchId, Id) of
-        undefined ->
-            #ofp_meter_stats_reply{body = []};
-        Pid ->
-            Meter = gen_server:call(Pid, get_state),
-            #ofp_meter_stats_reply{body = [export_stats(Meter)]}
     end.
 
 %% @doc Get meter configuration.

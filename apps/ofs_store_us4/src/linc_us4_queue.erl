@@ -19,6 +19,8 @@
 %% @doc Module implementing port's queues in userspace switch
 -module(linc_us4_queue).
 
+%% XXX rewrite so this stores config data in a table, not in process state.
+
 %% Queue API
 -export([attach_all/4,
          detach_all/2,
@@ -104,19 +106,6 @@ detach_all(SwitchId, PortNo) ->
                   end, get_queues(SwitchId, PortNo)).
 
 %% @doc Return queue stats for the given OF port and queue id.
--spec get_stats(integer(), ofp_queue_stats_request()) -> ofp_queue_stats_reply().
-get_stats(SwitchId, #ofp_queue_stats_request{port_no = PortNo,
-                                             queue_id = QueueId}) ->
-    match_queue(SwitchId, PortNo, QueueId).
-
--spec send(integer(), ofp_port_no(), ofp_queue_id(), binary()) -> ok | bad_queue.
-send(SwitchId, PortNo, QueueId, Frame) ->
-    case get_queue_pid(SwitchId, PortNo, QueueId) of
-        {error, bad_queue} ->
-            bad_queue;
-        Pid ->
-            gen_server:cast(Pid, {send, Frame})
-    end.
 
 -spec set_min_rate(integer(), ofp_port_no(), ofp_queue_id(), integer()) ->
                           ok |
@@ -186,8 +175,6 @@ start_link(SwitchId, QueueOpts) ->
 init([SwitchId, [{PortNo, QueueNo} = Key, PortRateDesc, ThrottlingETS,
                  SendFun, QueueProps]]) ->
 
-    History = linc_us4_sliding_window:new(?HIST_BUCKET_COUNT, ?HIST_BUCKET_SIZE),
-
     PortRateBps = rate_desc_to_bps(PortRateDesc),
     MinRateBps = get_min_rate_bps(QueueProps, PortRateBps),
     MaxRateBps = get_max_rate_bps(QueueProps, PortRateBps),
@@ -239,19 +226,6 @@ handle_call(get_state, _From, #state{resource_id = ResourceId,
     Queue = {ResourceId, QueueId, PortNo, MinRateBps, MaxRateBps},
     {reply, Queue, State}.
 
-handle_cast({send, Frame}, #state{queue_key = QueueKey,
-                                  min_rate = MinRate,
-                                  max_rate = MaxRate,
-                                  port_rate = PortRate,
-                                  history = History,
-                                  send_fun = SendFun,
-                                  switch_id = SwitchId,
-                                  throttling_ets = ThrottlingETS} = State) ->
-    NewHistory = sleep_and_send(QueueKey, MinRate, MaxRate,
-                                PortRate, ThrottlingETS,
-                                History, SendFun, Frame),
-    update_queue_tx_counters(SwitchId, QueueKey, byte_size(Frame)),
-    {noreply, State#state{history = NewHistory}};
 handle_cast({set_min_rate, MinRatePercent},
             #state{queue_key = {_PortNo, QueueId},
                    port_rate_bps = PortRateBps,
@@ -284,73 +258,15 @@ code_change(_OldVersion, State, _Extra) ->
 %% Helpers
 %%--------------------------------------------------------------------
 
-sleep_and_send(_MyKey, no_qos, _MaxRate, _PortRate, _ThrottlingETS,
-               History, SendFun, Frame) ->
-    SendFun(Frame),
-    History;
-sleep_and_send(MyKey, MinRate, MaxRate, PortRate, ThrottlingETS,
-               History, SendFun, Frame) ->
-    FrameSize = bit_size(Frame),
-    History1 = linc_us4_sliding_window:refresh(History),
-    TotalTransfer = linc_us4_sliding_window:total_transfer(History1),
-    HistoryLenMs = linc_us4_sliding_window:length_ms(History1),
-    MaxTransfer = max_transfer(MinRate, MaxRate, PortRate, ThrottlingETS),
-    OverTransfer = max(0, TotalTransfer + FrameSize - MaxTransfer),
-    PauseMs = pause_len(OverTransfer, HistoryLenMs, MaxTransfer),
-    try
-        Transfer = (TotalTransfer + FrameSize) div (HistoryLenMs + PauseMs),
-        update_transfer(MyKey, Transfer, ThrottlingETS),
-        timer:sleep(PauseMs),
-        SendFun(Frame),
-        History2 = linc_us4_sliding_window:bump_transfer(History1, FrameSize),
-        History2
-    catch
-        E1:E2 ->
-            ?ERROR("Error ~p:~p Total transfer: ~p, Frame Size: ~p, "
-                   "HistoryLenMs: ~p, PauseMs: ~p",
-                   [E1, E2, TotalTransfer, FrameSize,
-                    HistoryLenMs, PauseMs]),
-            ?ERROR("History1: ~p", [History1]),
-            History1
-    end.
 
-pause_len(_OverTransfer, _HistoryLenMs, 0) ->
-    ?PAUSE_ON_FULL;
-pause_len(OverTransfer, HistoryLenMs, MaxTransfer) ->
-    OverTransfer * HistoryLenMs div MaxTransfer.
 
-max_transfer(MinRate, MaxRate, PortRate, ThrottlingETS) ->
-    TotalRate = ets:foldl(fun(#linc_queue_throttling{rate = Rate}, Acc) ->
-                                  Rate + Acc
-                          end, 0, ThrottlingETS),
-    FreeRate = PortRate - TotalRate,
-    InterestedCount = ets:info(ThrottlingETS, size),
-    %% TODO: count only queues interested in sending more than their MinRate
-    MySlice = MinRate + FreeRate div InterestedCount,
-    min(MySlice, MaxRate).
 
-update_transfer({_, QueueId}, Rate, ThrottlingETS) ->
-    ets:update_element(ThrottlingETS,
-                       QueueId,
-                       {#linc_queue_throttling.rate, Rate}).
 
 bps_to_bphistlen(Bps) when is_integer(Bps) ->
     Bps * 1000 div ?HIST_LEN_MS;
 bps_to_bphistlen(Special) when is_atom(Special) ->
     Special.
 
--spec update_queue_tx_counters(integer(), {ofp_port_no(), ofp_queue_id()},
-                               integer()) -> any().
-update_queue_tx_counters(SwitchId, {PortNum, Queue} = Key, Bytes) ->
-    LincPortQueue = linc:lookup(SwitchId, linc_port_queue),
-    try ets:update_counter(LincPortQueue, Key,
-                           [{#linc_port_queue.tx_packets, 1},
-                            {#linc_port_queue.tx_bytes, Bytes}])
-    catch
-        E1:E2 ->
-            ?ERROR("Queue ~p for port ~p doesn't exist because: ~p:~p "
-                   "cannot update queue stats", [Queue, PortNum, E1, E2])
-    end.
 -spec get_queue_pid(integer(), ofp_port_no(), ofp_queue_id()) -> pid() |
                                                                  {error, bad_queue}.
 get_queue_pid(SwitchId, PortNo, QueueId) ->
@@ -402,29 +318,9 @@ match_queue(SwitchId, PortNo, PortMatch, QueueMatch) ->
                                 true
                         end,
                     Queues = lists:filter(F, L),
-                    QueueStats = queue_stats_convert(Queues),
                     #ofp_queue_stats_reply{body = QueueStats}
             end
     end.
-
--spec queue_stats_convert([#linc_port_queue{}]) -> [ofp_queue_stats()].
-queue_stats_convert(Queues) ->
-    lists:map(fun(#linc_port_queue{key = {PortNo, QueueId},
-                                   tx_bytes = TxBytes,
-                                   tx_packets = TxPackets,
-                                   tx_errors = TxErrors,
-                                   install_time = Time}) ->
-                      MicroDuration = timer:now_diff(erlang:now(), Time),
-                      DSec = microsec_to_sec(MicroDuration),
-                      DNSec = microsec_to_nsec(MicroDuration),
-                      #ofp_queue_stats{port_no = PortNo,
-                                       queue_id = QueueId,
-                                       tx_bytes = TxBytes,
-                                       tx_packets = TxPackets,
-                                       tx_errors = TxErrors,
-                                       duration_sec = DSec,
-                                       duration_nsec = DNSec}
-              end, Queues).
 
 rate_desc_to_bps(Bps) when is_integer(Bps) ->
     Bps;

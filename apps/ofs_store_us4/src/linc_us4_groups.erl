@@ -24,7 +24,6 @@
          terminate/1,
          modify/2,
          apply/2,
-         get_stats/2,
          get_desc/2,
          get_features/1,
          update_reference_count/3,
@@ -215,24 +214,6 @@ modify(SwitchId, #ofp_group_mod{ command = delete,
             group_delete(SwitchId, Id)
     end,
     ok.
-
-%%--------------------------------------------------------------------
-%% @doc Responds with stats for given group or special atom 'all' requests
-%% stats for all groups in a list
-%% Returns no error, if the requested id doesn't exist, would return empty list
--spec get_stats(integer(), #ofp_group_stats_request{}) ->
-                       #ofp_group_stats_reply{}.
-get_stats(SwitchId, #ofp_group_stats_request{group_id = GroupId}) ->
-    %% Special groupid 'all' requests all groups stats
-    IdList = case GroupId of
-                 all ->
-                     Pattern = ets:fun2ms(fun(#linc_group{id = Id}) -> Id end),
-                     ets:select(linc:lookup(SwitchId, group_table), Pattern);
-                 Id ->
-                     [Id]
-             end,
-    Stats = [group_get_stats(SwitchId, Id) || Id <- IdList],
-    #ofp_group_stats_reply{body = lists:flatten(Stats)}.
 
 %%--------------------------------------------------------------------
 -spec get_desc(integer(), #ofp_group_desc_request{}) ->

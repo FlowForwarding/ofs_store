@@ -29,13 +29,8 @@
          delete_where_meter/2,
          clear_table_flows/2,
          get_stats/2,
-         get_aggregate_stats/2,
-         get_table_stats/2,
          set_table_config/3,
-         get_table_config/2,
-         update_lookup_counter/2,
-         update_match_counters/4,
-         reset_idle_timeout/2]).
+         get_table_config/2]).
 
 %% Internal exports
 -export([check_timers/1]).
@@ -57,12 +52,6 @@
 %% @doc Initialize the flow tables module. Only to be called on system startup.
 -spec initialize(integer()) -> State::term().
 initialize(SwitchId) ->
-    FlowTableCounters = ets:new(flow_table_counters,
-                                [public,
-                                 {keypos, #flow_table_counter.id},
-                                 {write_concurrency, true}]),
-    linc:register(SwitchId, flow_table_counters, FlowTableCounters),
-
     FlowTableConfig = ets:new(flow_table_config,
                               [public,
                                {keypos, #flow_table_config.id},
@@ -282,48 +271,6 @@ get_stats(SwitchId, #ofp_flow_stats_request{table_id = TableId,
                            Match, OutPort, OutGroup),
     #ofp_flow_stats_reply{body = Stats}.
 
-%% @doc Get aggregate statistics.
--spec get_aggregate_stats(integer(), #ofp_aggregate_stats_request{}) ->
-                                 #ofp_aggregate_stats_reply{}.
-get_aggregate_stats(SwitchId, #ofp_aggregate_stats_request{
-                                 table_id = all,
-                                 out_port = OutPort,
-                                 out_group = OutGroup,
-                                 cookie = Cookie,
-                                 cookie_mask = CookieMask,
-                                 match = #ofp_match{fields=Match}}) ->
-    %%TODO
-    Stats = [get_aggregate_stats(SwitchId, TableId, Cookie, CookieMask,
-                                 Match, OutPort, OutGroup)
-             || TableId <- lists:seq(0, ?OFPTT_MAX)],
-    %% TODO: merge results
-    {PacketCount,ByteCount,FlowCount} = merge_aggregate_stats(Stats),
-    #ofp_aggregate_stats_reply{packet_count = PacketCount,
-                               byte_count = ByteCount,
-                               flow_count = FlowCount};
-get_aggregate_stats(SwitchId, #ofp_aggregate_stats_request{
-                                 table_id = TableId,
-                                 out_port = OutPort,
-                                 out_group = OutGroup,
-                                 cookie = Cookie,
-                                 cookie_mask = CookieMask,
-                                 match = #ofp_match{fields=Match}}) ->
-    {PacketCount,ByteCount,FlowCount} = get_aggregate_stats(SwitchId,
-                                                            TableId,
-                                                            Cookie,
-                                                            CookieMask,
-                                                            Match,
-                                                            OutPort,
-                                                            OutGroup),
-    #ofp_aggregate_stats_reply{packet_count = PacketCount,
-                               byte_count = ByteCount,
-                               flow_count = FlowCount}.
-
-%% @doc Get table statistics.
--spec get_table_stats(integer(), #ofp_table_stats_request{}) ->
-                             #ofp_table_stats_reply{}.
-get_table_stats(SwitchId, #ofp_table_stats_request{}) ->
-    #ofp_table_stats_reply{body = get_table_stats(SwitchId)}.
 
 -spec set_table_config(integer(), integer(), linc_table_config()) -> ok.
 set_table_config(SwitchId, TableId, Config) ->
@@ -338,47 +285,6 @@ get_table_config(SwitchId, TableId) ->
             Config;
         [] ->
             drop
-    end.
-
-%% @doc Update the table lookup statistics counters for a table.
--spec update_lookup_counter(integer(), integer()) -> ok.
-update_lookup_counter(SwitchId, TableId) ->
-    ets:update_counter(linc:lookup(SwitchId, flow_table_counters), TableId,
-                       [{#flow_table_counter.packet_lookups, 1, ?MAX64, 0}]),
-    ok.
-
-%% @doc Update the match lookup statistics counters for a specific flow.
--spec update_match_counters(SwitchId :: integer(), TableId :: integer(),
-                            FlowId :: flow_id(), PktByteSize :: integer()) -> ok.
-update_match_counters(SwitchId, TableId, FlowId, PktByteSize) ->
-    try
-        ets:update_counter(linc:lookup(SwitchId, flow_table_counters), TableId,
-                           [{#flow_table_counter.packet_lookups, 1, ?MAX64, 0},
-                            {#flow_table_counter.packet_matches, 1, ?MAX64, 0}]),
-        ets:update_counter(linc:lookup(SwitchId, flow_entry_counters),
-                           FlowId,[{#flow_entry_counter.received_packets,
-                                    1, ?MAX64, 0},
-                                   {#flow_entry_counter.received_bytes,
-                                    PktByteSize, ?MAX64, 0}]),
-        ok
-    catch
-        _:_ ->
-            ok
-    end.
-
-%% @doc Reset the idle timeout timer for a specific flow.
--spec reset_idle_timeout(integer(), integer()) -> ok.
-reset_idle_timeout(SwitchId, FlowId) ->
-    case get_flow_timer(SwitchId, FlowId) of
-        #flow_timer{idle_timeout = 0} ->
-            ok;
-        #flow_timer{idle_timeout = IdleTimeout}=_R ->
-            Now = os:timestamp(),
-            Next = calc_timeout(Now, IdleTimeout),
-            true = ets:update_element(linc:lookup(SwitchId, flow_timers),
-                                      FlowId,
-                                      {#flow_timer.expire, Next}),
-            ok
     end.
 
 %%=============================================================================
@@ -997,38 +903,11 @@ get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
                       end
               end, [], flow_table_ets(SwitchId, TableId)).
 
-get_aggregate_stats(SwitchId, TableId,Cookie, CookieMask,
-                    Match, OutPort, OutGroup) ->
-    ets:foldl(fun (#flow_entry{id = FlowId,
-                               cookie = MyCookie,
-                               instructions = Instructions}=FlowEntry, 
-                   {PacketsAcc,BytesAcc,FlowsAcc}=Acc) ->
-                      case cookie_match(MyCookie, Cookie, CookieMask)
-                          andalso non_strict_match(FlowEntry, Match)
-                          andalso port_and_group_match(OutPort,
-                                                       OutGroup,
-                                                       Instructions)
-                      of
-                          true ->
-                              FlowEntryCounters = linc:lookup(SwitchId,
-                                                              flow_entry_counters),
-                              Counters = ets:lookup(FlowEntryCounters, FlowId),
-                              [#flow_entry_counter{
-                                  received_packets = Packets,
-                                  received_bytes   = Bytes}] = Counters,
-                              {PacketsAcc+Packets,BytesAcc+Bytes,FlowsAcc+1};
-                          false ->
-                              Acc
-                      end
-              end, {0,0,0}, flow_table_ets(SwitchId, TableId)).
 
 merge_aggregate_stats(Stats) ->
     lists:foldl(fun ({Packets,Bytes,Flows}, {PacketsAcc,BytesAcc,FlowsAcc}) ->
                         {PacketsAcc+Packets, BytesAcc+Bytes, FlowsAcc+Flows}
                 end,{0,0,0},Stats).
-
-get_table_stats(SwitchId) ->
-    [get_table_stats1(SwitchId, TableId) || TableId <- lists:seq(0, ?OFPTT_MAX)].
 
 get_table_stats1(SwitchId, TableId) ->
     [#flow_table_counter{packet_lookups = Lookups,
