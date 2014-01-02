@@ -17,20 +17,13 @@
 %% @author Erlang Solutions Ltd. <openflow@erlang-solutions.com>
 %% @copyright 2012 FlowForwarding.org
 %% @doc Callback module for OpenFlow Logical Switch application.
--module(ofs_store).
+-module(ofs_store_app).
 
 -behaviour(application).
 
 %% Application callbacks
 -export([start/2,
          stop/1]).
-
--export([create/1,
-         delete/1,
-         register/3,
-         lookup/2]).
-
--include("ofs_store_logger.hrl").
 
 %%------------------------------------------------------------------------------
 %% Application callbacks
@@ -45,32 +38,3 @@ start(_StartType, _StartArgs) ->
 -spec stop(any()) -> ok.
 stop(_State) ->
     ok.
-
-%%------------------------------------------------------------------------------
-%% Common LINC helper functions
-%%------------------------------------------------------------------------------
-
-% XXX need to flatten these tables so there is one table for all switches
-% XXX store in mnesia
-
--spec create(integer()) -> ets:tid().
-create(SwitchId) ->
-    ets:new(name(SwitchId), [named_table, public,
-                             {read_concurrency, true}]).
-
--spec delete(integer()) -> true.
-delete(SwitchId) ->
-    true = ets:delete(name(SwitchId)).
-
--spec register(integer(), atom(), pid() | ets:tid()) -> true.
-register(SwitchId, Name, Pid) ->
-    true = ets:insert(name(SwitchId), {Name, Pid}).
-
--spec lookup(integer(), atom()) -> term().
-lookup(SwitchId, Name) ->
-    case ets:lookup(name(SwitchId), Name) of
-        [{Name, Pid}] ->
-            Pid;
-        [] ->
-            undefined
-    end.

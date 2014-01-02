@@ -5,5 +5,5 @@
                   stdlib,
                   lager,
                   mnesia]},
-  {mod, {ofs_store, []}},
+  {mod, {ofs_store_app, []}},
   {env, [{supported_versions, [4]}]}]}.
