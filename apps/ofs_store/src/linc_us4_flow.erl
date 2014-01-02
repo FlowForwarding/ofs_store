@@ -49,47 +49,21 @@
 -record(state,{switch_id :: integer(),
                tref}).
 
-%% @doc Initialize the flow tables module. Only to be called on system startup.
--spec initialize(integer()) -> State::term().
-initialize(SwitchId) ->
+%% @doc Initialize the flow tables. Only to be called on system startup.
+-spec initialize() -> ok
+initialize() ->
     FlowTableConfig = ets:new(flow_table_config,
                               [public,
                                {keypos, #flow_table_config.id},
                                {read_concurrency, true}]),
     linc:register(SwitchId, flow_table_config, FlowTableConfig),
 
+    % XXX create one big flow table.  Compound index of table id and flow id?
+    % no need to prepopulate.  Only load in config information as it's
+    % provided by the NE
     [create_flow_table(SwitchId, TableId)
-     || TableId <- lists:seq(0, ?OFPTT_MAX)],
+     || TableId <- lists:seq(0, ?OFPTT_MAX)].
 
-    FlowTimers = ets:new(flow_timers,
-                         [public,
-                          {keypos, #flow_timer.id},
-                          {write_concurrency, true}]),
-    linc:register(SwitchId, flow_timers, FlowTimers),
-    {ok,Tref} = timer:apply_interval(1000, linc_us4_flow,
-                                     check_timers, [SwitchId]),
-
-    FlowEntryCounters = ets:new(flow_entry_counters,
-                                [public,
-                                 {keypos, #flow_entry_counter.id},
-                                 {write_concurrency, true}]),
-    linc:register(SwitchId, flow_entry_counters, FlowEntryCounters),
-    #state{switch_id = SwitchId,
-           tref=Tref}.
-
-%% @doc Terminate the flow table module. Only to be called on system shutdown.
--spec terminate(#state{}) -> ok.
-terminate(#state{switch_id = SwitchId, tref=Tref}) ->
-    timer:cancel(Tref),
-    [begin
-         TId = flow_table_ets(SwitchId, TableId),
-         ets:delete(TId)
-     end || TableId <- lists:seq(0, ?OFPTT_MAX)],
-    ets:delete(linc:lookup(SwitchId, flow_table_config)),
-    ets:delete(linc:lookup(SwitchId, flow_table_counters)),
-    ets:delete(linc:lookup(SwitchId, flow_timers)),
-    ets:delete(linc:lookup(SwitchId, flow_entry_counters)),
-    ok.
 
 %% @doc Handle ofp_table_mod request
 %% In version 1.3 This doesn't do anything anymore.
@@ -104,26 +78,6 @@ table_mod(#ofp_table_mod{}) ->
 modify(_SwitchId, #ofp_flow_mod{command = Cmd, table_id = all})
   when Cmd == add orelse Cmd == modify orelse Cmd == modify_strict ->
     {error, {flow_mod_failed, bad_table_id}};
-modify(SwitchId, #ofp_flow_mod{command = Cmd, buffer_id = BufferId} = FlowMod)
-  when (Cmd == add orelse Cmd == modify orelse Cmd == modify_strict)
-       andalso BufferId /= no_buffer ->
-    %% A buffer_id is provided, we have to first do the flow_mod
-    %% and then a packet_out to OFPP_TABLE. This actually means to first
-    %% perform the flow_mod and then restart the processing of the buffered
-    %% packet starting in flow_table=0.
-    case modify(SwitchId, FlowMod#ofp_flow_mod{buffer_id = no_buffer}) of
-        ok ->
-            case linc_buffer:get_buffer(SwitchId, BufferId) of
-                #linc_pkt{} = OfsPkt ->
-                    Action = #ofp_action_output{port = table},
-                    linc_us4_actions:apply_list(OfsPkt, [Action]);
-                not_found ->
-                    %% Buffer has been dropped, ignore
-                    ok
-            end;
-        Error ->
-            Error
-    end;
 modify(SwitchId, #ofp_flow_mod{command = add,
                                table_id = TableId,
                                priority = Priority,
@@ -305,9 +259,6 @@ create_flow_table(SwitchId, TableId) ->
     Tid = ets:new(TableName, [ordered_set, public,
                               {keypos, #flow_entry.id},
                               {read_concurrency, true}]),
-    linc:register(SwitchId, TableName, Tid),
-    ets:insert(linc:lookup(SwitchId, flow_table_counters),
-               #flow_table_counter{id = TableId}),
     Tid.
 
 %% Check if there exists a flowin flow table=TableId with priority=Priority with
@@ -374,7 +325,6 @@ add_new_flow(SwitchId, TableId,
                            instructions=Instructions} = FlowMod) ->
     NewEntry = create_flow_entry(FlowMod),
     %% Create counter before inserting flow in flow table to avoid race.
-    create_flow_entry_counter(SwitchId, NewEntry#flow_entry.id),
     create_flow_timer(SwitchId, TableId, NewEntry#flow_entry.id,
                       IdleTime, HardTime),
     ets:insert(flow_table_ets(SwitchId, TableId), NewEntry),
@@ -395,7 +345,6 @@ delete_flow(SwitchId, TableId,
             ok
     end,
     ets:delete(flow_table_ets(SwitchId, TableId), FlowId),
-    ets:delete(linc:lookup(SwitchId, flow_entry_counters), FlowId),
     delete_flow_timer(SwitchId, FlowId),
     decrement_group_ref_count(SwitchId, Instructions),
     ?DEBUG("[FLOWMOD] Deleted flow entry with id ~w: ~w",
@@ -410,11 +359,6 @@ send_flow_removed(SwitchId, TableId,
                               match = Match},
                   Reason) ->
     DurationMs = timer:now_diff(os:timestamp(),InstallTime),
-    [#flow_entry_counter{
-        received_packets = Packets,
-        received_bytes   = Bytes}] = ets:lookup(linc:lookup(SwitchId,
-                                                            flow_entry_counters),
-                                                FlowId),
 
     #flow_timer{idle_timeout = IdleTimeout,
                 hard_timeout = HardTimeout} = get_flow_timer(SwitchId, FlowId),
@@ -842,22 +786,10 @@ modify_flow(SwitchId, TableId, #flow_entry{id=Id,instructions=PrevInstructions},
     ?DEBUG("[FLOWMOD] New instructions for flow entry ~w: ~w",
            [Id, NewInstructions]),
     increment_group_ref_count(SwitchId, NewInstructions),
-    decrement_group_ref_count(SwitchId, PrevInstructions),
-    case lists:member(reset_counts, Flags) of
-        true ->
-            true = ets:insert(linc:lookup(SwitchId, flow_entry_counters),
-                              #flow_entry_counter{id = Id}),
-            ok;
-        false ->
-            %% Do nothing
-            ok
-    end.
+    decrement_group_ref_count(SwitchId, PrevInstructions).
 
 %%============================================================================
 %% Various counter functions
-create_flow_entry_counter(SwitchId, FlowId) ->
-    true = ets:insert(linc:lookup(SwitchId, flow_entry_counters),
-                      #flow_entry_counter{id = FlowId}).
 
 get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
                Match, OutPort, OutGroup) ->
@@ -876,14 +808,6 @@ get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
                       of
                           true ->
                               DurationMs = timer:now_diff(os:timestamp(),InstallTime),
-                              Counters = ets:lookup(linc:lookup(SwitchId, flow_entry_counters), FlowId),
-                              [#flow_entry_counter{
-                                  received_packets = Packets,
-                                  received_bytes   = Bytes}] = Counters,
-
-                              #flow_timer{idle_timeout = IdleTimeout,
-                                          hard_timeout = HardTimeout} = get_flow_timer(SwitchId, FlowId),
-                              
                               Stats = #ofp_flow_stats{
                                          table_id = TableId,
                                          duration_sec = DurationMs div 1000000,
@@ -903,90 +827,6 @@ get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
                       end
               end, [], flow_table_ets(SwitchId, TableId)).
 
-
-merge_aggregate_stats(Stats) ->
-    lists:foldl(fun ({Packets,Bytes,Flows}, {PacketsAcc,BytesAcc,FlowsAcc}) ->
-                        {PacketsAcc+Packets, BytesAcc+Bytes, FlowsAcc+Flows}
-                end,{0,0,0},Stats).
-
-get_table_stats1(SwitchId, TableId) ->
-    [#flow_table_counter{packet_lookups = Lookups,
-                         packet_matches = Matches}]
-        = ets:lookup(linc:lookup(SwitchId, flow_table_counters), TableId),
-    #ofp_table_stats{
-       table_id = TableId,
-       active_count = ets:info(flow_table_ets(SwitchId, TableId), size),
-       lookup_count = Lookups,
-       matched_count = Matches}.
-
-%%============================================================================
-%% Various timer functions
-
-create_flow_timer(SwitchId, TableId, FlowId, IdleTime, HardTime) ->
-    Now = os:timestamp(),
-    true = ets:insert(linc:lookup(SwitchId, flow_timers),
-                      #flow_timer{id = FlowId,
-                                  table = TableId,
-                                  idle_timeout = IdleTime,
-                                  expire = calc_timeout(Now, IdleTime),
-                                  hard_timeout = HardTime,
-                                  remove = calc_timeout(Now, HardTime)
-                                 }).
-
-get_flow_timer(SwitchId, FlowId) ->
-    case ets:lookup(linc:lookup(SwitchId, flow_timers), FlowId) of
-        [Rec] ->
-            Rec;
-        [] ->
-            undefined
-    end.
-
-delete_flow_timer(SwitchId, FlowId) ->
-    ets:delete(linc:lookup(SwitchId, flow_timers), FlowId).
-
-calc_timeout(_Now, 0) ->
-    infinity;
-calc_timeout({Mega,Secs,Micro},Time) ->
-    case Secs+Time of
-        S when S>999999 ->
-            {Mega+1,S-999999,Micro};
-        S ->
-            {Mega,S,Micro}
-    end.
-
-check_timers(SwitchId) ->
-    Now = os:timestamp(),
-    ets:foldl(fun (Flow, ok) ->
-                      case hard_timeout(SwitchId, Now, Flow) of
-                          false ->
-                              idle_timeout(SwitchId, Now, Flow),
-                              ok;
-                          true ->
-                              ok
-                      end
-              end, ok, linc:lookup(SwitchId, flow_timers)).
-
-hard_timeout(_SwitchId, _Now, #flow_timer{remove = infinity}) ->
-    false;
-hard_timeout(SwitchId, Now,
-             #flow_timer{id = FlowId, table = TableId, remove = Remove})
-  when Remove < Now ->
-    delete_flow(SwitchId, TableId, get_flow(SwitchId, TableId, FlowId),
-                hard_timeout),
-    true;
-hard_timeout(_SwitchId, _Now, _Flow) ->
-    false.
-
-idle_timeout(_SwitchId, _Now, #flow_timer{expire = infinity}) ->
-    false;
-idle_timeout(SwitchId, Now,
-             #flow_timer{id = FlowId, table = TableId, expire = Expire})
-  when Expire < Now ->
-    delete_flow(SwitchId, TableId, get_flow(SwitchId, TableId, FlowId),
-                idle_timeout),
-    true;
-idle_timeout(_SwitchId, _Now, _Flow) ->
-    false.
 
 %%============================================================================
 %% Various lookup functions

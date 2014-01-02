@@ -124,6 +124,7 @@
 -define(MAX_PORTS, ?MAX).
 -define(MAX_BUFFERED_PACKETS, 0).
 
+-type table_id() :: non_neg_integer(),
 -type priority() :: non_neg_integer().
 -type flow_id() :: {priority(), reference()}.
 
@@ -132,11 +133,12 @@
                            | controller.
 
 -record(flow_table_config, {
-          id            :: non_neg_integer(),
+          id            :: table_id(),
           config = drop :: linc_table_config()
          }).
 
 -record(flow_entry, {
+          table_id                 :: table_id(),
           id                       :: flow_id(),
           priority                 :: priority(),
           match = #ofp_match{}     :: ofp_match(),
@@ -147,42 +149,3 @@
           idle = {infinity,0,0}    :: erlang:timestamp(),
           instructions = []        :: ordsets:ordset(ofp_instruction())
          }).
-
--record(flow_timer, {
-          id                       :: flow_id(),
-          table                    :: non_neg_integer(),
-          idle_timeout = infinity  :: infinity | non_neg_integer(),
-          hard_timeout = infinity  :: infinity | non_neg_integer(),
-          expire = infinity        :: infinity | non_neg_integer(),
-          remove = infinity        :: infinity | non_neg_integer()
-         }).
-
--record(flow_entry_counter, {
-          id                   :: flow_id(),
-          received_packets = 0 :: integer(),
-          received_bytes   = 0 :: integer()
-         }).
-
--record(flow_table_counter, {
-          id :: integer(),
-          %% Reference count is dynamically generated for the sake of simplicity
-          %% reference_count = 0 :: integer(),
-          packet_lookups = 0 :: integer(),
-          packet_matches = 0 :: integer()
-         }).
-
--record(linc_pkt, {
-          in_port                     :: ofp_port_no(),
-          fields = #ofp_match{}       :: ofp_match(),
-          actions = []                :: ordsets:ordset(ofp_action()),
-          packet = []                 :: pkt:packet(),
-          size = 0                    :: integer(),
-          queue_id = default          :: integer() | default,
-          table_id                    :: integer(),
-          no_packet_in = false        :: boolean(),
-          packet_in_reason            :: ofp_packet_in_reason(),
-          packet_in_bytes = no_buffer :: ofp_packet_in_bytes(),
-          cookie = <<-1:64>>          :: binary(),
-          switch_id = 0               :: integer()
-         }).
--type linc_pkt() :: #linc_pkt{}.
