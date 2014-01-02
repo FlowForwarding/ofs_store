@@ -19,9 +19,6 @@
 %% @doc Userspace implementation of the OpenFlow Switch logic.
 -module(linc_us4).
 
--behaviour(gen_switch).
-
-%% gen_switch callbacks
 -export([handle_message/2]).
 
 %% Handle all message types
@@ -45,7 +42,7 @@
 -include("linc_us4.hrl").
 
 %%%-----------------------------------------------------------------------------
-%%% gen_switch callbacks
+%%% main entry
 %%%-----------------------------------------------------------------------------
 
 -spec handle_message(ofp_message_body(), state()) ->
