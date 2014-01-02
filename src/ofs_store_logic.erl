@@ -16,17 +16,13 @@
 
 %% @author Erlang Solutions Ltd. <openflow@erlang-solutions.com>
 %% @copyright 2012 FlowForwarding.org
-%% @doc OpenFlow Logical Switch logic.
--module(linc_logic).
+%% @doc Switch level data store.
+-module(ofs_store_logic).
 
 -behaviour(gen_server).
 
 %% API
--export([send_to_controllers/2,
-         gen_datapath_id/1,
-         %% Backend general
-         get_datapath_id/1,
-         set_datapath_id/2,
+-export([%% Backend general
          get_backend_flow_tables/1,
          get_backend_capabilities/1,
          %% Backend ports
@@ -42,9 +38,7 @@
          set_queue_min_rate/4,
          get_queue_max_rate/3,
          set_queue_max_rate/4,
-         is_queue_valid/3,
-         %% Controllers
-         open_controller/5
+         is_queue_valid/3
         ]).
 
 %% Internal API
@@ -60,6 +54,7 @@
 
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_config/include/of_config.hrl").
+-include("ofs_store.hrl").
 -include("ofs_store_logger.hrl").
 
 -record(state, {
@@ -68,15 +63,6 @@
 %%------------------------------------------------------------------------------
 %% API functions
 %%------------------------------------------------------------------------------
-
--spec get_datapath_id(integer()) -> string().
-get_datapath_id(SwitchId) ->
-    gen_server:call(linc:lookup(SwitchId, linc_logic), get_datapath_id).
-
--spec set_datapath_id(integer(), string()) -> ok.
-set_datapath_id(SwitchId, DatapathId) ->
-    gen_server:cast(linc:lookup(SwitchId, linc_logic),
-                    {set_datapath_id, DatapathId}).
 
 -spec get_backend_flow_tables(integer()) -> list(#flow_table{}).
 get_backend_flow_tables(SwitchId) ->
@@ -140,21 +126,15 @@ is_queue_valid(SwitchId, PortNo, QueueId) ->
                                                         PortNo, QueueId}).
 
 %% @doc Start the OF Switch logic.
--spec start_link(integer(), atom(), term(), term()) -> {ok, pid()} |
-                                                       {error, any()}.
-start_link(SwitchId, BackendMod, BackendOpts, Config) ->
-    gen_server:start_link(?MODULE, [SwitchId, BackendMod,
-                                    BackendOpts, Config], []).
+-spec start_link() -> {ok, pid()} | {error, any()}.
+start_link() ->
+    gen_server:start_link({local, ?OFS_STORE_NAME}, ?MODULE, [], []).
 
 %%------------------------------------------------------------------------------
 %% gen_server callbacks
 %%------------------------------------------------------------------------------
 
 init([]) ->
-    %% We trap exit signals here to handle shutdown initiated by the supervisor
-    %% and run terminate function which invokes terminate in callback modules
-    process_flag(trap_exit, true),
-
     {ok, #state{}}.
 
 handle_call(get_datapath_id, _From, #state{datapath_id = DatapathId} = State) ->
@@ -213,12 +193,6 @@ handle_call({is_queue_valid, PortNo, QueueId}, _From,
 handle_call(_Message, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({send_to_controllers, Message},
-            #state{xid = Xid,
-                   switch_id = SwitchId,
-                   backend_mod = Backend} = State) ->
-    ofp_channel_send(SwitchId, Backend, Message#ofp_message{xid = Xid}),
-    {noreply, State#state{xid = Xid + 1}};
 handle_cast({set_datapath_id, DatapathId},
             #state{backend_mod = Backend,
                    backend_state = BackendState} = State) ->
@@ -266,18 +240,8 @@ handle_info({ofp_message, Pid, #ofp_message{body = MessageBody} = Message},
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(Reason, #state{switch_id = SwitchId, backend_mod = BackendMod,
-                         backend_state = BackendState}) ->
-    case Reason of
-        {backend_failed, DeatiledReason} ->
-            ?ERROR("Backend module ~p failed to start because: ~p",
-                   [BackendMod, DeatiledReason]),
-            supervisor:terminate_child(linc:lookup(SwitchId, linc_sup),
-                                       linc_logic);
-        _ ->
-            ok
-    end,
-    BackendMod:stop(BackendState).
+terminate(_Reason, _State) ->
+    ok.
 
 code_change(_OldVersion, State, _Extra) ->
     {ok, State}.
