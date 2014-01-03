@@ -30,7 +30,6 @@
          ofp_set_config/2,
          ofp_queue_get_config_request/2,
          ofp_flow_stats_request/2,  % only way to see flow tables
-         ofp_table_stats_request/2,
          ofp_port_desc_request/2,
          ofp_group_desc_request/2,
          ofp_meter_mod/2,
@@ -38,8 +37,16 @@
 
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
--include_lib("ofs_store/include/ofs_store_logger.hrl").
+-include("ofs_store.hrl").
+-include("ofs_store_logger.hrl").
 -include("linc_us4.hrl").
+
+% XXX temporary - until code is ported
+-record(state, {
+    switch_id,
+    switch_config
+}).
+-type state() :: #state{}.
 
 %%%-----------------------------------------------------------------------------
 %%% main entry
@@ -57,19 +64,9 @@ handle_message(MessageBody, State) ->
 %%%-----------------------------------------------------------------------------
 
 %% @doc Modify flow entry in the flow table.
--spec ofp_flow_mod(state(), ofp_flow_mod()) ->
-                          {noreply, #state{}} |
-                          {reply, ofp_message(), #state{}}.
-ofp_flow_mod(#state{switch_id = SwitchId} = State,
-             #ofp_flow_mod{} = FlowMod) ->
-    case linc_us4_flow:modify(SwitchId, FlowMod) of
-        ok ->
-            {noreply, State};
-        {error, {Type, Code}} ->
-            ErrorMsg = #ofp_error_msg{type = Type,
-                                      code = Code},
-            {reply, ErrorMsg, State}
-    end.
+-spec ofp_flow_mod(datapath_id(), ofp_flow_mod()) -> ok | {error, term()}.
+ofp_flow_mod(DatapathId, FlowMod) ->
+    linc_us4_flow:modify(DatapathId, FlowMod).
 
 %% @doc Modify flow table configuration.
 -spec ofp_table_mod(state(), ofp_table_mod()) ->

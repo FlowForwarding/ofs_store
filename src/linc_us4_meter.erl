@@ -24,7 +24,6 @@
 
 %% API
 -export([modify/2,
-         apply/3,
          update_flow_count/3,
          get_config/2,
          get_features/0,
@@ -43,8 +42,8 @@
          terminate/2,
          code_change/3]).
 
--include_lib("linc/include/linc_logger.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
+-include("ofs_store_logger.hrl").
 -include("linc_us4.hrl").
 
 -define(SUPPORTED_BANDS, [drop,
@@ -145,18 +144,6 @@ update_flow_count(SwitchId, Id, Incr) ->
             gen_server:cast(Pid, {update_flow_count, Incr})
     end.
 
-%% @doc Apply meter to a packet.
--spec apply(integer(), integer(), #linc_pkt{}) ->
-                   {continue, NewPkt :: #linc_pkt{}} | drop.
-apply(SwitchId, Id, Pkt) ->
-    case get_meter_pid(SwitchId, Id) of
-        undefined ->
-            ?DEBUG("Applying non existing meter ~p", [Id]),
-            drop;
-        Pid ->
-            gen_server:call(Pid, {apply, Pkt})
-    end.
-
 %% @doc Get meter configuration.
 -spec get_config(integer(), integer() | all) ->
                         Reply :: #ofp_meter_config_reply{}.
@@ -223,54 +210,6 @@ init([SwitchId, #ofp_meter_mod{meter_id = Id} = MeterMod]) ->
             {stop, Code}
     end.
 
-handle_call({apply, Pkt}, _From, #linc_meter{rate_value = Value,
-                                             burst = UseBurstSize,
-                                             burst_history = Bursts,
-                                             pkt_count = Pkts,
-                                             byte_count = Bytes,
-                                             bands = Bands} = State) ->
-    PktBytes = Pkt#linc_pkt.size,
-    NewPkts = Pkts + 1,
-    NewBytes = Bytes + PktBytes,
-    Now = now(),
-
-    BurstPeriod =
-        case Bands of
-            _ when not UseBurstSize ->
-                0;
-            [] ->
-                0;
-            [_|_] ->
-                lists:max(lists:map(fun(#linc_meter_band{
-                                           rate = Rate,
-                                           burst_size = BurstSize}) ->
-                                            BurstSize * 1000000 / Rate
-                                    end, Bands))
-        end,
-    %% Keep history for 1 second, to calculate the current rate, or
-    %% for the time needed to accomodate the burst size if that is
-    %% longer.
-    KeepHistoryFor = max(1000000, BurstPeriod),
-    NewBursts = [{Now, PktBytes}] ++
-        %% The history list is sorted by decreasing timestamps, so we
-        %% can just chop off the tail.
-        lists:takewhile(fun({Ts, _}) -> timer:now_diff(Now, Ts) < KeepHistoryFor end,
-                        Bursts),
-
-    %% Check packets during the last second, to determine current rate.
-    Rate = sum_traffic(Value, Now, 1000000, NewBursts),
-
-    {Reply, NewBands} = apply_band(Value, Now, Rate, Pkt, Bands,
-                                   case UseBurstSize of
-                                       true ->
-                                           NewBursts;
-                                       false ->
-                                           no_burst_size
-                                   end),
-    {reply, Reply, State#linc_meter{burst_history = NewBursts,
-                                    pkt_count = NewPkts,
-                                    byte_count = NewBytes,
-                                    bands = NewBands}};
 handle_call(get_state, _From, State) ->
     {reply, State, State}.
 
@@ -292,97 +231,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%------------------------------------------------------------------------------
 %% Internal functions
 %%------------------------------------------------------------------------------
-
-sum_traffic(kbps, Now, KeepInterval, Bursts) ->
-    Bytes = sum_bytes(Now, KeepInterval, Bursts, 0),
-    Bytes * 8 div 1000;
-sum_traffic(pktps, Now, KeepInterval, Bursts) ->
-    sum_packets(Now, KeepInterval, Bursts, 0).
-
-sum_bytes(_, _, [], Bytes) ->
-    Bytes;
-sum_bytes(Now, KeepInterval, [{Ts, PacketBytes} | Tail], Bytes) ->
-    case timer:now_diff(Now, Ts) of
-        Elapsed when Elapsed < KeepInterval ->
-            sum_bytes(Now, KeepInterval, Tail, Bytes + PacketBytes);
-        _ ->
-            Bytes
-    end.
-
-sum_packets(_, _, [], Packets) ->
-    Packets;
-sum_packets(Now, KeepInterval, [{Ts, _} | Tail], Packets) ->
-    case timer:now_diff(Now, Ts) of
-        Elapsed when Elapsed < KeepInterval ->
-            sum_packets(Now, KeepInterval, Tail, Packets + 1);
-        _ ->
-            Packets
-    end.
-
-apply_band(Unit, Now, Rate, Pkt, Bands, Bursts) ->
-    case find_the_right_band(Unit, Now, Rate, Bands, Bursts) of
-        false ->
-            {{continue, Pkt}, Bands};
-        N ->
-            R = case lists:nth(N, Bands) of
-                    #linc_meter_band{type = drop} ->
-                        drop;
-                    #linc_meter_band{type = dscp_remark,
-                                     prec_level = Prec} ->
-                        NewPkt = linc_us4_packet:decrement_dscp(Pkt, Prec),
-                        {continue, NewPkt};
-                    #linc_meter_band{type = experimenter,
-                                     experimenter = _ExperimenterId} ->
-                        %%
-                        %% Put your EXPERIMENTER band code here
-                        %%
-                        {continue, Pkt}
-                end,
-            {R, update_band(N, Bands, Pkt#linc_pkt.size)}
-    end.
-
-find_the_right_band(Unit, Now, Rate, Bands, Bursts) ->
-    F = fun(#linc_meter_band{rate = BRate, burst_size = BurstSize},
-            {HRate, HighN, N}) when Rate > BRate, BRate > HRate ->
-                %% The current rate is higher than the rate of
-                %% this band.  Are we in a "burst" that should
-                %% be allowed for now?
-                if Bursts =:= no_burst_size ->
-                        %% Burst flag disabled.
-                        {BRate, N, N + 1};
-                   is_list(Bursts) ->
-                        BurstPeriod = BurstSize * 1000000 / BRate,
-                        BurstPeriodTraffic = sum_traffic(Unit, Now, BurstPeriod, Bursts),
-                        if BurstPeriodTraffic =< BurstSize ->
-                                %% The burst is smaller than the
-                                %% allowed burst size: allow it.
-                                {HRate, HighN, N + 1};
-                           BurstPeriodTraffic > BurstSize ->
-                                %% The burst exceeds the allowed burst
-                                %% size: apply the meter band.
-                                {BRate, N, N + 1}
-                        end
-                end;
-           (#linc_meter_band{}, {HRate, HighN, N}) ->
-                %% The configured rate of the meter band is either
-                %% higher than the current traffic rate, or lower than
-                %% another meter band that we've already chosen.
-                {HRate, HighN, N + 1}
-        end,
-    case lists:foldl(F, {-1, 0, 1}, Bands) of
-        {-1, 0, _} ->
-            false;
-        {_, N, _} ->
-            N
-    end.
-
-update_band(1, [Band | Bands], NewBytes) ->
-    #linc_meter_band{pkt_count = Pkts,
-                     byte_count = Bytes} = Band,
-    [Band#linc_meter_band{pkt_count = Pkts + 1,
-                          byte_count = Bytes + NewBytes} | Bands];
-update_band(N, [Band | Bands], Bytes) ->
-    [Band | update_band(N - 1, Bands, Bytes)].
 
 import_meter(#ofp_meter_mod{meter_id = Id,
                             flags = Flags,

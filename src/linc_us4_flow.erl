@@ -19,9 +19,10 @@
 %% @doc Module for handling flows.
 -module(linc_us4_flow).
 
+% XXX may have lost idle time/hard timeout for flow
+
 %% API
--export([initialize/1,
-         terminate/1,
+-export([initialize/0,
          table_mod/1,
          modify/2,
          get_flow_table/2,
@@ -32,13 +33,10 @@
          set_table_config/3,
          get_table_config/2]).
 
-%% Internal exports
--export([check_timers/1]).
-
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
--include_lib("linc/include/linc_logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
+-include("ofs_store_logger.hrl").
 -include("linc_us4.hrl").
 
 -define(MAX64, 16#FFFFFFFF). % Max countervalue for 64 bit counters
@@ -46,23 +44,19 @@
                        ofp_instruction_write_actions, ofp_instruction_apply_actions,
                        ofp_instruction_clear_actions, ofp_instruction_experimenter]).
 
--record(state,{switch_id :: integer(),
-               tref}).
-
 %% @doc Initialize the flow tables. Only to be called on system startup.
--spec initialize() -> ok
+-spec initialize() -> ok.
 initialize() ->
-    FlowTableConfig = ets:new(flow_table_config,
+    ets:new(flow_table_config,
                               [public,
                                {keypos, #flow_table_config.id},
                                {read_concurrency, true}]),
-    linc:register(SwitchId, flow_table_config, FlowTableConfig),
 
     % XXX create one big flow table.  Compound index of table id and flow id?
     % no need to prepopulate.  Only load in config information as it's
     % provided by the NE
-    [create_flow_table(SwitchId, TableId)
-     || TableId <- lists:seq(0, ?OFPTT_MAX)].
+    % create_flow_table().
+    ok.
 
 
 %% @doc Handle ofp_table_mod request
@@ -324,9 +318,6 @@ add_new_flow(SwitchId, TableId,
                            hard_timeout=HardTime,
                            instructions=Instructions} = FlowMod) ->
     NewEntry = create_flow_entry(FlowMod),
-    %% Create counter before inserting flow in flow table to avoid race.
-    create_flow_timer(SwitchId, TableId, NewEntry#flow_entry.id,
-                      IdleTime, HardTime),
     ets:insert(flow_table_ets(SwitchId, TableId), NewEntry),
     increment_group_ref_count(SwitchId, Instructions),
     ?DEBUG("[FLOWMOD] Added new flow entry with id ~w: ~w",
@@ -345,7 +336,6 @@ delete_flow(SwitchId, TableId,
             ok
     end,
     ets:delete(flow_table_ets(SwitchId, TableId), FlowId),
-    delete_flow_timer(SwitchId, FlowId),
     decrement_group_ref_count(SwitchId, Instructions),
     ?DEBUG("[FLOWMOD] Deleted flow entry with id ~w: ~w",
            [FlowId, Flow]),
@@ -360,9 +350,6 @@ send_flow_removed(SwitchId, TableId,
                   Reason) ->
     DurationMs = timer:now_diff(os:timestamp(),InstallTime),
 
-    #flow_timer{idle_timeout = IdleTimeout,
-                hard_timeout = HardTimeout} = get_flow_timer(SwitchId, FlowId),
-
     Body = #ofp_flow_removed{
               cookie = Cookie,
               priority =Priority,
@@ -370,10 +357,6 @@ send_flow_removed(SwitchId, TableId,
               table_id = TableId,
               duration_sec = DurationMs div 1000000,
               duration_nsec = DurationMs rem 1000000 * 1000,
-              idle_timeout = IdleTimeout,
-              hard_timeout = HardTimeout,
-              packet_count = Packets,
-              byte_count = Bytes,
               match = Match},
     Msg = #ofp_message{type = ofp_flow_removed,
                        body = Body
@@ -812,11 +795,7 @@ get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
                                          table_id = TableId,
                                          duration_sec = DurationMs div 1000000,
                                          duration_nsec = DurationMs rem 1000000 * 1000,
-                                         idle_timeout = IdleTimeout,
-                                         hard_timeout = HardTimeout,
                                          flags = Flags,
-                                         packet_count = Packets,
-                                         byte_count = Bytes,
                                          priority = Priority,
                                          cookie = MyCookie,
                                          match = MyMatch,

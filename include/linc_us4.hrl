@@ -124,7 +124,7 @@
 -define(MAX_PORTS, ?MAX).
 -define(MAX_BUFFERED_PACKETS, 0).
 
--type table_id() :: non_neg_integer(),
+-type table_id() :: non_neg_integer().
 -type priority() :: non_neg_integer().
 -type flow_id() :: {priority(), reference()}.
 

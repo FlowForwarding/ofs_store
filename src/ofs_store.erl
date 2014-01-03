@@ -1,8 +1,9 @@
 -module(ofs_store).
 
--export(update/2).
+-export([update/1]).
 
+-include_lib("of_protocol/include/of_protocol.hrl").
 -include("ofs_store.hrl").
 
 update(Request = #ofs_store_request{}) ->
-    gen_server:call(ofs_store, {update, Request}).
+    ofs_store:update(Request).

@@ -22,7 +22,7 @@
 -behaviour(supervisor).
 
 %% API
--export([start_link/3]).
+-export([start_link/0]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -31,7 +31,7 @@
 %% API functions
 %%------------------------------------------------------------------------------
 
--spec start_link(term()) -> {ok, pid()} | ignore | {error, term()}.
+-spec start_link() -> {ok, pid()} | ignore | {error, term()}.
 start_link() ->
     supervisor:start_link(?MODULE, []).
 

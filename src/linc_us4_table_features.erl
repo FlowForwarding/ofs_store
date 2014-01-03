@@ -22,7 +22,7 @@
 -export([handle_req/2]).
 
 -include_lib("of_protocol/include/ofp_v4.hrl").
--include_lib("linc_us4/include/linc_us4.hrl").
+-include("linc_us4.hrl").
 
 -define(REQUIRED_PROPERTIES, [instructions,
                               next_tables,

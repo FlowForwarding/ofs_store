@@ -23,16 +23,14 @@
 -export([initialize/1,
          terminate/1,
          modify/2,
-         apply/2,
          get_desc/2,
          get_features/1,
-         update_reference_count/3,
          is_valid/2]).
 
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
--include_lib("linc/include/linc_logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
+-include("ofs_store_logger.hrl").
 -include("linc_us4.hrl").
 
 -type linc_bucket_id() :: {integer(), binary()}.
@@ -98,29 +96,6 @@ terminate(SwitchId) ->
     ok.
 
 %%--------------------------------------------------------------------
-%% @doc Modifies group reference count by Increment
-%% NOTE: will not wrap to 0xFFFFFFFF if accidentaly went below zero, the
-%% counter will remain negative, but will wrap if overflows 32bit
-update_reference_count(SwitchId, GroupId, Increment) ->
-    group_update_stats(SwitchId, GroupId, reference_count, Increment).
-
-%%--------------------------------------------------------------------
-%% @doc Applies group GroupId to packet Pkt, result should be list of
-%% packets and ports where they are destined or 'drop' atom. Packet is
-%% cloned if multiple ports are the destination.
--spec apply(GroupId :: integer(), Pkt :: #linc_pkt{}) -> ok.
-apply(GroupId, #linc_pkt{switch_id = SwitchId} = Pkt) ->
-    case group_get(SwitchId, GroupId) of
-        not_found -> ok;
-        Group     ->
-            %% update group stats
-            group_update_stats(SwitchId, GroupId, packet_count, 1),
-            group_update_stats(SwitchId, GroupId, byte_count, Pkt#linc_pkt.size),
-
-            apply_group_type_to_packet(Group, Pkt)
-    end.
-
-%%--------------------------------------------------------------------
 -spec modify(integer(), #ofp_group_mod{}) -> ok |
                                              {error, Type :: atom(), Code :: atom()}.
 
@@ -148,14 +123,7 @@ modify(SwitchId, #ofp_group_mod{ command = add,
      },
     case ets:insert_new(linc:lookup(SwitchId, group_table), Entry) of
         true ->
-            %% just in case, zero stats
-            group_reset_stats(SwitchId, Id),
-            group_reset_timers(SwitchId, Id),
-            lists:foreach(
-              fun(Bucket) ->
-                      BucketId = Bucket#linc_bucket.unique_id,
-                      group_reset_bucket_stats(SwitchId, BucketId)
-              end, OFSBuckets);
+            ok;
         false ->
             {error, #ofp_error_msg{type = group_mod_failed,
                                    code = group_exists}}
@@ -180,15 +148,7 @@ modify(SwitchId, #ofp_group_mod{ command = modify,
         not_found ->
             {error, #ofp_error_msg{type = group_mod_failed,
                                    code = unknown_group}};
-        OldGroup ->
-            lists:foreach(
-              fun(B) ->
-                      group_reset_bucket_stats(SwitchId,
-                                               B#linc_bucket.unique_id)
-              end, OldGroup#linc_group.buckets),
-
-            group_reset_stats(SwitchId, Id),
-            group_delete_timers(SwitchId, Id),
+        _OldGroup ->
             ets:insert(linc:lookup(SwitchId, group_table), Entry),
             ok
     end;
@@ -241,109 +201,6 @@ get_features(#ofp_group_features_request{ flags = _F }) ->
 is_valid(SwitchId, GroupId) ->
     ets:member(linc:lookup(SwitchId, group_table), GroupId).
 
-%%%==============================================================
-%%% Tool Functions
-%%%==============================================================
-
-%% @internal
-%% @doc Chooses a bucket of actions from list of buckets according to the
-%% group type. Executes actions. Returns [{packet, portnum|'drop'}]
-%% (see 5.4.1 of OF1.2 spec)
--spec apply_group_type_to_packet(#linc_group{}, #linc_pkt{}) -> ok.
-
-apply_group_type_to_packet(#linc_group{type = all, buckets = Buckets},
-                           Pkt = #linc_pkt{}) ->
-    %% Required: all: Execute all buckets in the group. This group is used for
-    %% multicast or broadcast forwarding. The packet is effectively cloned for
-    %% each bucket; one packet is processed for each bucket of the group. If a
-    %% bucket directs a packet explicitly out of the ingress port, this packet
-    %% clone is dropped. If the controller writer wants to forward out of the
-    %% ingress port, the group should include an extra bucket which includes an
-    %% output action to the OFPP_IN_PORT reseved port.
-    lists:map(fun(Bucket) ->
-                      apply_bucket(Bucket, Pkt)
-              end, Buckets),
-    ok;
-
-apply_group_type_to_packet(G = #linc_group{type = select, buckets = Buckets},
-                           Pkt = #linc_pkt{}) ->
-    %% Optional: select: Execute one bucket in the group. Packets are processed
-    %% by a single bucket in the group, based on a switch-computed selection
-    %% algorithm (e.g. hash on some user-configured tuple or simple round robin).
-    %% All configuration and state for the selection algorithm is external to
-    %% OpenFlow. The selection algorithm should implement equal load sharing and
-    %% can optionally be based on bucket weights. When a port specified in a
-    %% bucket in a select group goes down, the switch may restrict bucket
-    %% selection to the remaining set (those with forwarding actions to live ports)
-    %% instead of dropping packets destined to that port.
-
-    Rand = random:uniform(G#linc_group.total_weight),
-    Bucket = select_random_bucket_by_weight(Rand, 0, Buckets),
-
-    %% check against empty bucket list
-    true = (Bucket =/= not_found),
-    ok = apply_bucket(Bucket, Pkt),
-    ok;
-
-apply_group_type_to_packet(#linc_group{type = indirect, buckets = Buckets},
-                           Pkt = #linc_pkt{})  ->
-    %% Required: indirect: Execute the one defined bucket in this group. This
-    %% group supports only a single bucket. Allows multiple flows or groups to
-    %% point to a common group identifier, supporting faster, more efficient
-    %% convergence (e.g. next hops for IP forwarding). This group type is
-    %% effectively identical to an 'all' group with one bucket.
-    [Bucket] = Buckets,
-    ok = apply_bucket(Bucket, Pkt),
-    ok;
-
-apply_group_type_to_packet(#linc_group{type = ff, buckets = Buckets},
-                           Pkt = #linc_pkt{})  ->
-    %% Optional: fast failover: Execute the first live bucket. Each action bucket
-    %% is associated with a specific port and/or group that controls its liveness.
-    %% The buckets are evaluated in the order defined by the group, and the first
-    %% bucket which is associated with a live port/group is selected. This group
-    %% type enables the switch to change forwarding without requiring a round
-    %% trip to the controller. If no buckets are live, packets are dropped. This
-    %% group type must implement a liveness mechanism (see 6.9 of OF1.2 spec)
-    case pick_live_bucket(Buckets) of
-        false ->
-            ok;
-        Bucket ->
-            ok = apply_bucket(Bucket, Pkt),
-            ok
-    end.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Select bucket based on port liveness logic
--spec pick_live_bucket([#linc_bucket{}]) -> #linc_bucket{} | false.
-
-pick_live_bucket([]) -> false;
-pick_live_bucket([Bucket | _]) -> Bucket.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Applies set of commands
--spec apply_bucket(#linc_bucket{}, #linc_pkt{}) -> ok.
-
-apply_bucket(#linc_bucket{
-                unique_id = BucketId,
-                bucket = #ofp_bucket{actions = Actions}},
-             #linc_pkt{switch_id = SwitchId} = Pkt) ->
-    %% update bucket stats no matter where packet goes
-    group_update_bucket_stats(SwitchId, BucketId, packet_count, 1),
-    group_update_bucket_stats(SwitchId, BucketId, byte_count, Pkt#linc_pkt.size),
-
-    %%ActionsSet = ordsets:from_list(Actions),
-    case linc_us4_actions:apply_set(Pkt#linc_pkt{ actions = Actions }) of
-        {error, Reason} ->
-            larger:error("Applying bucket with ID ~p failed becase: ~p~n",
-                         [BucketId, Reason]),
-            ok;
-        _SideEffects ->
-            ok
-    end.
-
 %%--------------------------------------------------------------------
 %% @internal
 %% @doc Called from modify() to wrap incoming buckets into #linc_bucket{}, with
@@ -377,168 +234,6 @@ create_unique_id_for_bucket(B) ->
     %% Create a hash
     crypto:sha(Image).
 
-%%%==============================================================
-%%% Stats counters and groups support functions
-%%%==============================================================
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Deletes all stats for group but not the buckets!
-group_reset_stats(SwitchId, GroupId) ->
-    %% Delete stats for group
-    GroupStats = linc:lookup(SwitchId, group_stats),
-    ets:delete(GroupStats, {group, GroupId, reference_count}),
-    ets:delete(GroupStats, {group, GroupId, packet_count}),
-    ets:delete(GroupStats, {group, GroupId, byte_count}),
-    ok.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Resets group stats starting time to current Unix time (in microsec)
-group_reset_timers(SwitchId, GroupId) ->
-    %% Set timer of the group to current time
-    {Mega, Sec, Micro} = os:timestamp(),
-    NowMicro = (Mega * 1000000 + Sec) * 1000000 + Micro,
-    ets:insert(linc:lookup(SwitchId, group_stats),
-               #linc_group_stats{
-                  key   = {group_start_time, GroupId},
-                  value = NowMicro
-                 }),
-    ok.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Deletes timer from ETS
-group_delete_timers(SwitchId, GroupId) ->
-    ets:delete(linc:lookup(SwitchId ,group_stats), {group_start_time, GroupId}).
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Updates stat counter in ETS for group
--spec group_update_stats(SwitchId :: integer(),
-                         GroupId :: integer(),
-                         Stat :: atom(),
-                         Increment :: integer()) -> ok.
-group_update_stats(SwitchId, GroupId, Stat, Increment) ->
-    Threshold = (1 bsl group_stat_bitsize(Stat)) - 1,
-    try
-        ets:update_counter(linc:lookup(SwitchId, group_stats),
-                           {group, GroupId, Stat},
-                           {#linc_group_stats.value, Increment, Threshold, 0})
-    catch
-        error:badarg ->
-            ets:insert(linc:lookup(SwitchId, group_stats),
-                       #linc_group_stats{
-                          key = {group, GroupId, Stat},
-                          value = Increment
-                         })
-    end,
-    ok.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Requests full group stats
--spec group_get_stats(integer(), integer()) -> list(#ofp_group_stats{}).
-group_get_stats(SwitchId, GroupId) ->
-    case group_get(SwitchId, GroupId) of
-        not_found ->
-            [];
-        G ->
-            BStats = [#ofp_bucket_counter{
-                         packet_count = group_get_bucket_stat(SwitchId,
-                                                              Bucket#linc_bucket.unique_id,
-                                                              packet_count),
-                         byte_count = group_get_bucket_stat(SwitchId,
-                                                            Bucket#linc_bucket.unique_id,
-                                                            byte_count)
-                        } || Bucket <- G#linc_group.buckets],
-
-            {MicroNowMS, MicroNowS, MicroNowMicroS} = os:timestamp(),
-            MicroNow = (MicroNowMS * 1000000 + MicroNowS) * 1000000 + MicroNowMicroS,
-            GroupTime = MicroNow - group_get_time(SwitchId, GroupId),
-
-            [#ofp_group_stats{
-                group_id      = GroupId,
-                ref_count     = group_get_stat(SwitchId, GroupId, reference_count),
-                packet_count  = group_get_stat(SwitchId, GroupId, packet_count),
-                byte_count    = group_get_stat(SwitchId, GroupId, byte_count),
-                bucket_stats  = BStats,
-                duration_sec  = GroupTime div 1000000,           % seconds
-                duration_nsec = (GroupTime rem 1000000) * 1000 % microsec * 1000 = nsec
-               }]
-    end.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Retrieves one stat for group, zero if stat or group doesn't exist
-group_get_stat(SwitchId, GroupId, Stat) ->
-    case ets:lookup(linc:lookup(SwitchId, group_stats),
-                    {group, GroupId, Stat}) of
-        [] ->
-            0;
-        [{linc_group_stats, {group, GroupId, Stat}, Value}] ->
-            Value
-    end.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Retrieves life duration of group. Record not found is error
-group_get_time(SwitchId, GroupId) ->
-    case ets:lookup(linc:lookup(SwitchId, group_stats),
-                    {group_start_time, GroupId}) of
-        [] ->
-            erlang:error({?MODULE, group_get_time, not_found, GroupId});
-        [{linc_group_stats, {group_start_time, GroupId}, Value}] ->
-            Value
-    end.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Retrieves one stat for bucket (group id is part of bucket id),
-%% returns zero if stat or group or bucket doesn't exist
-group_get_bucket_stat(SwitchId, BucketId, Stat) ->
-    case ets:lookup(linc:lookup(SwitchId, group_stats),
-                    {bucket, BucketId, Stat}) of
-        [] ->
-            0;
-        [Value] ->
-            Value
-    end.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Deletes bucket stats for groupid and bucketid
--spec group_reset_bucket_stats(integer(), linc_bucket_id()) -> ok.
-group_reset_bucket_stats(SwitchId, BucketId) ->
-    ets:delete(linc:lookup(SwitchId, group_stats),
-               {bucket, BucketId, packet_count}),
-    ets:delete(linc:lookup(SwitchId, group_stats),
-               {bucket, BucketId, byte_count}),
-    ok.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Updates stat counter in ETS for bucket in group
--spec group_update_bucket_stats(SwitchId :: integer(),
-                                BucketId :: linc_bucket_id(),
-                                Stat :: atom(),
-                                Increment :: integer()) -> ok.
-group_update_bucket_stats(SwitchId, BucketId, Stat, Increment) ->
-    Threshold = (1 bsl group_bucket_stat_bitsize(Stat)) - 1,
-    try
-        ets:update_counter(linc:lookup(SwitchId, group_stats),
-                           {bucket, BucketId, Stat},
-                           {#linc_group_stats.value, Increment, Threshold, 0})
-    catch
-        error:badarg ->
-            ets:insert(linc:lookup(SwitchId, group_stats),
-                       #linc_group_stats{
-                          key = {bucket, BucketId, Stat},
-                          value = Increment
-                         })
-    end,
-    ok.
-
 %%--------------------------------------------------------------------
 %% @internal
 %% @doc Reads group from ETS or returns not_found
@@ -550,23 +245,6 @@ group_get(SwitchId, GroupId) ->
         [Group] ->
             Group
     end.
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Returns bit width of counter fields for group
-group_stat_bitsize(reference_count) -> 32;
-group_stat_bitsize(packet_count)    -> 64;
-group_stat_bitsize(byte_count)      -> 64.
-                                                %group_stat_bitsize(X) ->
-                                                %    erlang:raise(exit, {badarg, X}).
-
-%%--------------------------------------------------------------------
-%% @internal
-%% @doc Returns bit width of counter fields for bucket
-group_bucket_stat_bitsize(packet_count) -> 64;
-group_bucket_stat_bitsize(byte_count)   -> 64.
-                                                %group_bucket_stat_bitsize(X) ->
-                                                %    erlang:raise(exit, {badarg, X}).
 
 
 %%--------------------------------------------------------------------
@@ -623,11 +301,6 @@ group_delete_2(SwitchId, Id, ProcessedGroups) ->
                                                               FirstGroup,
                                                               ordsets:new()),
 
-            %% Delete group timers and bucket timers
-            group_delete_timers(SwitchId, Id),
-
-            %% Delete group stats and remove the group
-            group_reset_stats(SwitchId, Id),
             ets:delete(GroupTable, Id),
 
             %% Remove flows containing given group along with it
@@ -659,18 +332,6 @@ group_find_groups_that_refer_to(SwitchId, Id, EtsKey, OrdSet) ->
             OrdSet2 = ordsets:add_element(EtsKey, OrdSet),
             group_find_groups_that_refer_to(SwitchId, Id, NextKey, OrdSet2)
     end.
-
-%%--------------------------------------------------------------------
-%% @internal
-select_random_bucket_by_weight(_RandomWeight, _Accum, []) ->
-    not_found;
-select_random_bucket_by_weight(RandomWeight, Accum, [Bucket|_])
-  when RandomWeight >= Accum ->
-    Bucket;
-select_random_bucket_by_weight(RandomWeight, Accum, [Bucket|Tail]) ->
-    select_random_bucket_by_weight(RandomWeight,
-                                   Accum + (Bucket#linc_bucket.bucket)#ofp_bucket.weight,
-                                   Tail).
 
 %%--------------------------------------------------------------------
 %% @internal

@@ -24,8 +24,6 @@
 %% Queue API
 -export([attach_all/4,
          detach_all/2,
-         get_stats/2,
-         send/4,
          set_min_rate/4,
          set_max_rate/4,
          get_all_queues_state/2,
@@ -47,7 +45,7 @@
 -include_lib("of_config/include/of_config.hrl").
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
--include_lib("linc/include/linc_logger.hrl").
+-include("ofs_store_logger.hrl").
 -include("linc_us4.hrl").
 -include("linc_us4_queue.hrl").
 
@@ -173,7 +171,7 @@ start_link(SwitchId, QueueOpts) ->
 %%%-----------------------------------------------------------------------------
 
 init([SwitchId, [{PortNo, QueueNo} = Key, PortRateDesc, ThrottlingETS,
-                 SendFun, QueueProps]]) ->
+                 _SendFun, QueueProps]]) ->
 
     PortRateBps = rate_desc_to_bps(PortRateDesc),
     MinRateBps = get_min_rate_bps(QueueProps, PortRateBps),
@@ -207,7 +205,6 @@ init([SwitchId, [{PortNo, QueueNo} = Key, PortRateDesc, ThrottlingETS,
                 port_rate = PortRate,
                 min_rate = MinRate,
                 max_rate = MaxRate,
-                history = History, send_fun = SendFun,
                 switch_id = SwitchId,
                 throttling_ets = ThrottlingETS}}.
 
@@ -289,39 +286,6 @@ get_queues(SwitchId, PortNo) ->
             Match
     end.
 
-match_queue(SwitchId, any, all) ->
-    match_queue(SwitchId, any, '_', '_');
-match_queue(SwitchId, any, QueueMatch) ->
-    match_queue(SwitchId, any, '_', QueueMatch);
-match_queue(SwitchId, PortNo, all) ->
-    match_queue(SwitchId, PortNo, PortNo, '_');
-match_queue(SwitchId, PortMatch, QueueMatch) ->
-    match_queue(SwitchId, PortMatch, PortMatch, QueueMatch).
-
-match_queue(SwitchId, PortNo, PortMatch, QueueMatch) ->
-    case linc_us4_port:is_valid(SwitchId, PortNo) of
-        false ->
-            #ofp_error_msg{type = queue_op_failed, code = bad_port};
-        true ->
-            MatchSpec = #linc_port_queue{key = {PortMatch, QueueMatch},
-                                         _ = '_'},
-            LincPortQueue = linc:lookup(SwitchId, linc_port_queue),
-            case catch ets:match_object(LincPortQueue, MatchSpec) of
-                [] ->
-                    #ofp_error_msg{type = queue_op_failed, code = bad_queue};
-                {'EXIT', _} ->
-                    #ofp_error_msg{type = queue_op_failed, code = bad_queue};
-                L ->
-                    F = fun(#linc_port_queue{key = {_, default}}) ->
-                                false;
-                           (_) ->
-                                true
-                        end,
-                    Queues = lists:filter(F, L),
-                    #ofp_queue_stats_reply{body = QueueStats}
-            end
-    end.
-
 rate_desc_to_bps(Bps) when is_integer(Bps) ->
     Bps;
 rate_desc_to_bps({Value, Unit}) ->
@@ -350,9 +314,3 @@ get_max_rate_bps(QueueProps, PortRateBps) ->
         _ ->
             no_max_rate
     end.
-
-microsec_to_sec(Micro) ->
-    Micro div 1000000.
-
-microsec_to_nsec(Micro) ->
-    (Micro rem 1000000) * 1000.

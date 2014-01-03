@@ -26,16 +26,13 @@
 -module(linc_us4_port).
 
 % XXX no longer a gen_server -- need to rewrite this so port information is stored in a table.
--behaviour(gen_server).
 
 %% Port API
 -export([start_link/2,
          initialize/2,
          terminate/1,
          modify/2,
-         send/2,
          get_desc/1,
-         get_stats/2,
          get_state/2,
          set_state/3,
          get_config/2,
@@ -50,14 +47,13 @@
 -include_lib("of_config/include/of_config.hrl").
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
--include_lib("linc/include/ofs_store_logger.hrl").
+-include("ofs_store_logger.hrl").
 -include("linc_us4.hrl").
 -include("linc_us4_port.hrl").
 
 %% gen_server callbacks
 -export([init/1,
          handle_call/3,
-         handle_cast/2,
          handle_info/2,
          terminate/2,
          code_change/3]).
@@ -227,17 +223,11 @@ init([SwitchId, {port, PortNo, PortOpts}]) ->
                      advertised = Advertised,
                      supported = ?FEATURES, peer = ?FEATURES,
                      curr_speed = ?PORT_SPEED, max_speed = ?PORT_SPEED},
-    QueuesState = case queues_enabled(SwitchId) of
-                      false ->
-                          disabled;
-                      true ->
-                          enabled
-                  end,
     SwitchName = "LogicalSwitch" ++ integer_to_list(SwitchId),
     ResourceId =  SwitchName ++ "-" ++ PortName,
     {interface, Interface} = lists:keyfind(interface, 1, PortOpts),
     State = #state{resource_id = ResourceId, interface = Interface, port = Port,
-                   queues = QueuesState, switch_id = SwitchId},
+                   switch_id = SwitchId},
     Type = case lists:keyfind(type, 1, PortOpts) of
         {type, Type1} ->
             Type1;
@@ -266,16 +256,6 @@ init([SwitchId, {port, PortNo, PortOpts}]) ->
                     ets:insert(linc:lookup(SwitchId, linc_port_stats),
                                #ofp_port_stats{port_no = PortNo,
                                                duration_sec = erlang:now()}),
-                    case queues_config(SwitchId, PortOpts) of
-                        disabled ->
-                            disabled;
-                        QueuesConfig ->
-                            SendFun = fun(Frame) ->
-                                              port_command(ErlangPort, Frame)
-                                      end,
-                            linc_us4_queue:attach_all(SwitchId, PortNo,
-                                                      SendFun, QueuesConfig)
-                    end,
                     {ok, State#state{erlang_port = ErlangPort,
                                      port_ref = Pid,
                                      port = Port#ofp_port{hw_addr = HwAddr}}}
@@ -290,18 +270,6 @@ init([SwitchId, {port, PortNo, PortOpts}]) ->
         eth ->
             {Socket, IfIndex, EpcapPid, HwAddr} =
                 linc_us4_port_native:eth(Interface),
-            case queues_config(SwitchId, PortOpts) of
-                disabled ->
-                    disabled;
-                QueuesConfig ->
-                    SendFun = fun(Frame) ->
-                                      linc_us4_port_native:send(Socket,
-                                                                IfIndex,
-                                                                Frame)
-                              end,
-                    linc_us4_queue:attach_all(SwitchId, PortNo,
-                                              SendFun, QueuesConfig)
-            end,
             ets:insert(linc:lookup(SwitchId, linc_ports),
                        #linc_port{port_no = PortNo, pid = self()}),
             ets:insert(linc:lookup(SwitchId, linc_port_stats),
@@ -429,19 +397,4 @@ get_port_pid(SwitchId, PortNo) ->
             {error, nonexistent};
         [#linc_port{pid = Pid}] ->
             Pid
-    end.
-
--spec queues_config(integer(), list(linc_port_config())) -> [term()] |
-                                                            disabled.
-queues_config(SwitchId, PortOpts) ->
-    case queues_enabled(SwitchId) of
-        true ->
-            case lists:keyfind(queues, 1, PortOpts) of
-                false ->
-                    disabled;
-                {queues, Queues} ->
-                    Queues
-            end;
-        false ->
-            disabled
     end.

@@ -1,7 +1,7 @@
-% registered name of ofs_store pid
--define(OFS_STORE_NAME, ofs_store).
+% XXX better definition for datapath_id
+-type datapath_id() :: term().
 
 -record(ofs_store_request, {
     datapath_id :: datapath_id(),
-    request :: ofp_message()
+    message :: ofp_message()
 }).

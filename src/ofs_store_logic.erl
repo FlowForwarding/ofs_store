@@ -22,9 +22,9 @@
 -behaviour(gen_server).
 
 %% API
--export([%% Backend general
+-export([update/1,
+         %% Backend general
          get_backend_flow_tables/1,
-         get_backend_capabilities/1,
          %% Backend ports
          get_backend_ports/1,
          get_port_config/2,
@@ -42,7 +42,7 @@
         ]).
 
 %% Internal API
--export([start_link/4]).
+-export([start_link/0]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -58,11 +58,19 @@
 -include("ofs_store_logger.hrl").
 
 -record(state, {
-         }).
+    datapath_id,
+    switch_id,
+    ofconfig_backend_mod,
+    backend_mod,
+    backend_state
+ }).
 
 %%------------------------------------------------------------------------------
 %% API functions
 %%------------------------------------------------------------------------------
+
+update(Request = #ofs_store_request{}) ->
+    gen_server:call(?MODULE, {update, Request}).
 
 -spec get_backend_flow_tables(integer()) -> list(#flow_table{}).
 get_backend_flow_tables(SwitchId) ->
@@ -128,7 +136,7 @@ is_queue_valid(SwitchId, PortNo, QueueId) ->
 %% @doc Start the OF Switch logic.
 -spec start_link() -> {ok, pid()} | {error, any()}.
 start_link() ->
-    gen_server:start_link({local, ?OFS_STORE_NAME}, ?MODULE, [], []).
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%------------------------------------------------------------------------------
 %% gen_server callbacks
@@ -137,6 +145,12 @@ start_link() ->
 init([]) ->
     {ok, #state{}}.
 
+handle_call({update, Request}, _From, State) ->
+    #ofs_store_request{datapath_id = DataPathId, message = Message} = Request,
+    #ofp_message{version = Version, body = Body} = Message,
+    ProtocolModule = protocol_module(Version),
+    Reply = ProtocolModule:handle_message(DataPathId, Body),
+    {reply, Reply, State};
 handle_call(get_datapath_id, _From, #state{datapath_id = DatapathId} = State) ->
     {reply, DatapathId, State};
 handle_call(get_backend_flow_tables, _From,
@@ -193,13 +207,6 @@ handle_call({is_queue_valid, PortNo, QueueId}, _From,
 handle_call(_Message, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({set_datapath_id, DatapathId},
-            #state{backend_mod = Backend,
-                   backend_state = BackendState} = State) ->
-    BackendState2 = Backend:set_datapath_mac(BackendState,
-                                             extract_mac(DatapathId)),
-    {noreply, State#state{backend_state = BackendState2,
-                          datapath_id = DatapathId}};
 handle_cast({set_port_config, PortNo, PortConfig},
             #state{ofconfig_backend_mod = OFConfigBackendMod,
                    switch_id = SwitchId} = State) ->
@@ -223,20 +230,6 @@ handle_cast({set_queue_max_rate, PortNo, QueueId, Rate},
 handle_cast(_Message, State) ->
     {noreply, State}.
 
-handle_info({ofp_message, Pid, #ofp_message{body = MessageBody} = Message},
-            #state{backend_mod = Backend,
-                   backend_state = BackendState} = State) ->
-    ?DEBUG("Received message from the controller: ~p", [Message]),
-    NewBState = case Backend:handle_message(MessageBody, BackendState) of
-                    {noreply, NewState} ->
-                        NewState;
-                    {reply, ReplyBody, NewState} ->
-                        ofp_channel_send(Pid,
-                                         Backend,
-                                         Message#ofp_message{body = ReplyBody}),
-                        NewState
-                end,
-    {noreply, State#state{backend_state = NewBState}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -249,3 +242,6 @@ code_change(_OldVersion, State, _Extra) ->
 %%%-----------------------------------------------------------------------------
 %%% Helpers
 %%%-----------------------------------------------------------------------------
+
+protocol_module(4) ->
+    linc_us4.
