@@ -6,4 +6,4 @@
 -include("ofs_store.hrl").
 
 update(Request = #ofs_store_request{}) ->
-    ofs_store:update(Request).
+    ofs_store_logic:update(Request).

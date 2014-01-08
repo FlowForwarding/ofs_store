@@ -126,7 +126,7 @@
 
 -type table_id() :: non_neg_integer().
 -type priority() :: non_neg_integer().
--type flow_id() :: {priority(), reference()}.
+-type flow_id() :: reference().
 
 -type linc_table_config() :: continue
                            | drop
@@ -138,14 +138,15 @@
          }).
 
 -record(flow_entry, {
-          table_id                 :: table_id(),
           id                       :: flow_id(),
+          datapath_id              :: datapath_id(),
+          table_id                 :: table_id(),
           priority                 :: priority(),
           match = #ofp_match{}     :: ofp_match(),
           cookie = <<0:64>>        :: binary(),
           flags = []               :: [ofp_flow_mod_flag()],
-          install_time             :: erlang:timestamp(),
           expires = {infinity,0,0} :: erlang:timestamp(),
           idle = {infinity,0,0}    :: erlang:timestamp(),
           instructions = []        :: ordsets:ordset(ofp_instruction())
          }).
+-type flow_entry() :: #flow_entry{}.

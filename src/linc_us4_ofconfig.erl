@@ -35,6 +35,7 @@
 -include_lib("of_config/include/of_config.hrl").
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
+-include("ofs_store.hrl").
 -include("linc_us4.hrl").
 
 -spec set_port_features(integer(), ofp_port_no(),

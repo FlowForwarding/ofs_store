@@ -42,8 +42,10 @@
          terminate/2,
          code_change/3]).
 
+-include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include("ofs_store_logger.hrl").
+-include("ofs_store.hrl").
 -include("linc_us4.hrl").
 
 -define(SUPPORTED_BANDS, [drop,
@@ -310,37 +312,6 @@ import_band(#ofp_meter_band_experimenter{rate = Rate,
     end;
 import_band(_) ->
     error.
-
-export_stats(#linc_meter{id = Id,
-                         stats = StatsEnabled,
-                         bands = Bands,
-                         install_ts = Then} = Meter) ->
-    BandStats = [export_band_stats(StatsEnabled, Band) || Band <- Bands],
-    MicroDuration = timer:now_diff(now(), Then),
-    {Flows, Pkts, Bytes} = case StatsEnabled of
-                               true ->
-                                   #linc_meter{flow_count = F,
-                                               pkt_count = P,
-                                               byte_count = B} = Meter,
-                                   {F, P, B};
-                               false ->
-                                   {-1, -1, -1}
-                           end,
-    #ofp_meter_stats{meter_id = Id,
-                     flow_count = Flows,
-                     packet_in_count = Pkts,
-                     byte_in_count = Bytes,
-                     duration_sec = MicroDuration div 1000000,
-                     duration_nsec = (MicroDuration rem 1000) * 1000,
-                     band_stats = BandStats}.
-
-export_band_stats(true, #linc_meter_band{pkt_count = Pkts,
-                                         byte_count = Bytes}) ->
-    #ofp_meter_band_stats{packet_band_count = Pkts,
-                          byte_band_count = Bytes};
-export_band_stats(false, _Band) ->
-    #ofp_meter_band_stats{packet_band_count = -1,
-                          byte_band_count = -1}.
 
 export_meter(#linc_meter{id = Id,
                          rate_value = Value,

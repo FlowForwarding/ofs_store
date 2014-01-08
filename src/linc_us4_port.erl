@@ -29,7 +29,7 @@
 
 %% Port API
 -export([start_link/2,
-         initialize/2,
+         initialize/1,
          terminate/1,
          modify/2,
          get_desc/1,
@@ -41,13 +41,13 @@
          get_advertised_features/2,
          set_advertised_features/3,
          get_all_ports_state/1,
-         get_all_queues_state/1,
-         is_valid/2]).
+         get_all_queues_state/1]).
 
 -include_lib("of_config/include/of_config.hrl").
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include("ofs_store_logger.hrl").
+-include("ofs_store.hrl").
 -include("linc_us4.hrl").
 -include("linc_us4_port.hrl").
 
@@ -69,8 +69,8 @@
 start_link(SwitchId, PortConfig) ->
     gen_server:start_link(?MODULE, [SwitchId, PortConfig], []).
 
--spec initialize(integer(), tuple(config, list(linc_port_config()))) -> ok.
-initialize(SwitchId, Config) ->
+-spec initialize(integer()) -> ok.
+initialize(SwitchId) ->
     LincPorts = ets:new(linc_ports, [public,
                                      {keypos, #linc_port.port_no},
                                      {read_concurrency, true}]),
@@ -185,13 +185,6 @@ get_all_queues_state(SwitchId) ->
     lists:flatmap(fun(PortNo) ->
                           linc_us4_queue:get_all_queues_state(SwitchId, PortNo)
                   end, get_all_port_no(SwitchId)).
-
-%% @doc Test if a port exists.
--spec is_valid(integer(), ofp_port_no()) -> boolean().
-is_valid(_SwitchId, PortNo) when is_atom(PortNo)->
-    true;
-is_valid(SwitchId, PortNo) when is_integer(PortNo)->
-    ets:member(linc:lookup(SwitchId, linc_ports), PortNo).
 
 %%%-----------------------------------------------------------------------------
 %%% gen_server callbacks
@@ -346,7 +339,7 @@ handle_info(_Info, State) ->
 
 %% @private
 terminate(_Reason, #state{port = #ofp_port{port_no = PortNo},
-                          switch_id = SwitchId} = State) ->
+                          switch_id = SwitchId}) ->
     true = ets:delete(linc:lookup(SwitchId, linc_ports), PortNo).
 
 %% @private
@@ -363,18 +356,6 @@ get_all_port_no(SwitchId) ->
     ets:foldl(fun(#linc_port{port_no = PortNo}, Acc) ->
                       [PortNo | Acc]
               end, [], linc:lookup(SwitchId, linc_ports)).
-
--spec add(linc_port_type(), integer(), [linc_port_config()]) -> pid() | error.
-add(physical, SwitchId, PortConfig) ->
-    Sup = linc:lookup(SwitchId, linc_us4_port_sup),
-    case supervisor:start_child(Sup, [PortConfig]) of
-        {ok, Pid} ->
-            ?INFO("Created port: ~p", [PortConfig]),
-            Pid;
-        {error, shutdown} ->
-            ?ERROR("Cannot create port ~p", [PortConfig]),
-            error
-    end.
 
 %% @doc Removes given OF port from the switch, as well as its port stats entry,
 %% all queues connected to it and their queue stats entries.

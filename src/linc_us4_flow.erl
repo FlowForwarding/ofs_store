@@ -37,6 +37,7 @@
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("ofs_store_logger.hrl").
+-include("ofs_store.hrl").
 -include("linc_us4.hrl").
 
 -define(MAX64, 16#FFFFFFFF). % Max countervalue for 64 bit counters
@@ -67,101 +68,76 @@ table_mod(#ofp_table_mod{}) ->
 
 %% @doc Handle a flow_mod request from a controller.
 %% This may add/modify/delete one or more flows.
--spec modify(integer(), #ofp_flow_mod{}) ->
+-spec modify(datapath_id(), #ofp_flow_mod{}) ->
                     ok | {error, {Type :: atom(), Code :: atom()}}.
-modify(_SwitchId, #ofp_flow_mod{command = Cmd, table_id = all})
+modify(_DatapathId, #ofp_flow_mod{command = Cmd, table_id = all})
   when Cmd == add orelse Cmd == modify orelse Cmd == modify_strict ->
     {error, {flow_mod_failed, bad_table_id}};
-modify(SwitchId, #ofp_flow_mod{command = add,
+modify(DatapathId, #ofp_flow_mod{command = add,
                                table_id = TableId,
                                priority = Priority,
                                flags = Flags,
-                               match = #ofp_match{fields = Match},
-                               instructions = Instructions} = FlowMod) ->
-    case validate_match_and_instructions(SwitchId, TableId,
-                                         Match, Instructions) of
-        ok ->
-            case lists:member(check_overlap, Flags) of
-                true ->
-                    %% Check that there are no overlapping flows.
-                    case check_overlap(SwitchId, TableId, Priority, Match) of
-                        true ->
-                            {error, {flow_mod_failed, overlap}};
-                        false ->
-                            add_new_flow(SwitchId, TableId, FlowMod)
-                    end;
-                false ->
-                    %% Check if there is any entry with the exact same 
-                    %% priority and match
-                    case find_exact_match(SwitchId, TableId,
-                                          Priority, Match) of
-                        #flow_entry{} = Matching ->
-                            replace_existing_flow(SwitchId, TableId, FlowMod,
-                                                  Matching, Flags);
-                        no_match ->
-                            add_new_flow(SwitchId, TableId, FlowMod)
-                    end
-            end;
-        Error ->
-            Error
+                               match = #ofp_match{fields = Match}} = FlowMod) ->
+    case lists:member(check_overlap, Flags) of
+        true ->
+            add_new_flow(DatapathId, TableId, FlowMod);
+        false ->
+            %% Check if there is any entry with the exact same 
+            %% priority and match
+            case find_exact_match(DatapathId, TableId,
+                                  Priority, Match) of
+                #flow_entry{} = Matching ->
+                    replace_existing_flow(DatapathId, TableId, FlowMod,
+                                          Matching, Flags);
+                no_match ->
+                    add_new_flow(DatapathId, TableId, FlowMod)
+            end
     end;
-modify(SwitchId, #ofp_flow_mod{command = modify,
+modify(DatapathId, #ofp_flow_mod{command = modify,
                                cookie = Cookie,
                                cookie_mask = CookieMask,
                                table_id = TableId,
                                flags = Flags,
                                match = #ofp_match{fields = Match},
                                instructions = Instructions}) ->
-    case validate_match_and_instructions(SwitchId, TableId,
-                                         Match, Instructions) of
-        ok ->
-            modify_matching_flows(SwitchId, TableId, Cookie, CookieMask,
+    modify_matching_flows(DatapathId, TableId, Cookie, CookieMask,
                                   Match, Instructions, Flags),
-            ok;
-        Error ->
-            Error
-    end;
-modify(SwitchId, #ofp_flow_mod{command = modify_strict,
+    ok;
+modify(DatapathId, #ofp_flow_mod{command = modify_strict,
                                table_id = TableId,
                                priority = Priority,
                                flags = Flags,
                                match = #ofp_match{fields = Match},
                                instructions = Instructions}) ->
-    case validate_match_and_instructions(SwitchId, TableId,
-                                         Match, Instructions) of
-        ok ->
-            case find_exact_match(SwitchId, TableId, Priority, Match) of
-                #flow_entry{} = Flow ->
-                    modify_flow(SwitchId, TableId, Flow, Instructions, Flags);
-                no_match ->
-                    %% Do nothing
-                    ok
-            end;
-        Error ->
-            Error
+    case find_exact_match(DatapathId, TableId, Priority, Match) of
+        #flow_entry{} = Flow ->
+            modify_flow(DatapathId, TableId, Flow, Instructions, Flags);
+        no_match ->
+            %% Do nothing
+            ok
     end;
-modify(SwitchId, #ofp_flow_mod{command = Cmd, table_id = all} = FlowMod)
+modify(DatapathId, #ofp_flow_mod{command = Cmd, table_id = all} = FlowMod)
   when Cmd == delete; Cmd == delete_strict ->
-    [modify(SwitchId, FlowMod#ofp_flow_mod{table_id = Id})
+    [modify(DatapathId, FlowMod#ofp_flow_mod{table_id = Id})
      || Id <- lists:seq(0, ?OFPTT_MAX)],
     ok;
-modify(SwitchId, #ofp_flow_mod{command = delete,
+modify(DatapathId, #ofp_flow_mod{command = delete,
                                table_id = TableId,
                                cookie = Cookie,
                                cookie_mask = CookieMask,
                                out_port = OutPort,
                                out_group = OutGroup,
                                match = #ofp_match{fields = Match}}) ->
-    delete_matching_flows(SwitchId, TableId, Cookie, CookieMask,
+    delete_matching_flows(DatapathId, TableId, Cookie, CookieMask,
                           Match, OutPort, OutGroup),
     ok;
-modify(SwitchId, #ofp_flow_mod{command = delete_strict,
+modify(DatapathId, #ofp_flow_mod{command = delete_strict,
                                 table_id = TableId,
                                 priority = Priority,
                                 match = #ofp_match{fields = Match}}) ->
-    case find_exact_match(SwitchId, TableId, Priority, Match) of
+    case find_exact_match(DatapathId, TableId, Priority, Match) of
         #flow_entry{} = FlowEntry ->
-            delete_flow(SwitchId, TableId, FlowEntry, delete);
+            delete_flow(DatapathId, TableId, FlowEntry, delete);
         _ ->
             %% Do nothing
             ok
@@ -246,497 +222,44 @@ flow_table_ets(SwitchId, TableId) ->
     TableName = flow_table_name(TableId),
     linc:lookup(SwitchId, TableName).
 
-%% Create an ETS table for flow table Id, also initialize flow table counters
-%% for the table.
-create_flow_table(SwitchId, TableId) ->
-    TableName = flow_table_name(TableId),
-    Tid = ets:new(TableName, [ordered_set, public,
-                              {keypos, #flow_entry.id},
-                              {read_concurrency, true}]),
-    Tid.
-
-%% Check if there exists a flowin flow table=TableId with priority=Priority with
-%% a match that overlaps with Match.
-check_overlap(SwitchId, TableId, Priority, NewMatch) ->
-    ExistingMatches = lists:sort(get_matches_by_priority(SwitchId, TableId,
-                                                         Priority)),
-    SortedNewMatch = lists:sort(NewMatch),
-    lists:any(fun (ExistingMatch) ->
-                      overlaps(SortedNewMatch, lists:sort(ExistingMatch))
-              end, ExistingMatches).
-
-overlaps([#ofp_field{class=C,name=F,has_mask=false,value=V}|Ms1],
-         [#ofp_field{class=C,name=F,has_mask=false,value=V}|Ms2]) ->
-    overlaps(Ms1,Ms2);
-overlaps([#ofp_field{class=C,name=F,has_mask=false,value=V1}|_Fields1],
-         [#ofp_field{class=C,name=F,has_mask=false,value=V2}|_Fields2])
-  when V1=/=V2 ->
-    false;
-overlaps([#ofp_field{class=C,name=F,has_mask=true,value=V1,mask=MaskBin}|_Fields1],
-         [#ofp_field{class=C,name=F,has_mask=false,value=V2}|_Fields2]) ->
-    Bits = bit_size(MaskBin),
-    <<Val1:Bits>> = V1,
-    <<Val2:Bits>> = V2,
-    <<Mask:Bits>> = MaskBin,
-    Val1 band Mask == Val2 band Mask;
-overlaps([#ofp_field{class=C,name=F,has_mask=true,value=V1}|_Fields1],
-         [#ofp_field{class=C,name=F,has_mask=false,value=V2,mask=MaskBin}|_Fields2]) ->
-    Bits = bit_size(MaskBin),
-    <<Val1:Bits>> = V1,
-    <<Val2:Bits>> = V2,
-    <<Mask:Bits>> = MaskBin,
-    Val1 band Mask == Val2 band Mask;
-overlaps([#ofp_field{class=C,name=F,has_mask=true,value=V1,mask=M1}|Ms1],
-         [#ofp_field{class=C,name=F,has_mask=true,value=V2,mask=M2}|Ms2]) ->
-    Bits = bit_size(M1),
-    <<Val1:Bits>> = V1,
-    <<Val2:Bits>> = V2,
-    <<Mask1:Bits>> = M1,
-    <<Mask2:Bits>> = M2,
-    CommonBits = Mask1 band Mask2,
-    %% Is this correct?
-    case (Val1 band CommonBits)==(Val2 band CommonBits) of
-        false ->
-            false;
-        true ->
-            overlaps(Ms1,Ms2)
-    end;
-overlaps([#ofp_field{class=C,name=F1}|Ms1],
-         [#ofp_field{class=C,name=F2}|_]=Ms2) when F1<F2 ->
-    %% Both lists of match fields have been sorted, so this actually works.
-    overlaps(Ms1,Ms2);
-overlaps([#ofp_field{class=C,name=F1}|_]=Ms1,
-         [#ofp_field{class=C,name=F2}|Ms2]) when F1>F2 ->
-    %% Both lists of match fields have been sorted, so this actually works.
-    overlaps(Ms1,Ms2);
-overlaps(_V1,_V2) ->
-    true.
-
 %% Add a new flow entry.
-add_new_flow(SwitchId, TableId,
-             #ofp_flow_mod{idle_timeout=IdleTime,
-                           hard_timeout=HardTime,
-                           instructions=Instructions} = FlowMod) ->
-    NewEntry = create_flow_entry(FlowMod),
-    ets:insert(flow_table_ets(SwitchId, TableId), NewEntry),
-    increment_group_ref_count(SwitchId, Instructions),
+add_new_flow(DatapathId, TableId, FlowMod) ->
+    NewEntry = create_flow_entry(DatapathId, TableId, FlowMod),
+    ofs_store_db:insert_flow_entry(NewEntry),
     ?DEBUG("[FLOWMOD] Added new flow entry with id ~w: ~w",
            [NewEntry#flow_entry.id, FlowMod]),
     ok.
 
 %% Delete a flow
 delete_flow(SwitchId, TableId,
-            #flow_entry{id=FlowId, instructions=Instructions, flags=Flags}=Flow,
-            Reason) ->
-    case lists:member(send_flow_rem, Flags) andalso Reason/=no_event of
-        true ->
-            send_flow_removed(SwitchId, TableId, Flow, Reason);
-        false ->
-            %% Do nothing
-            ok
-    end,
+            #flow_entry{id=FlowId}=Flow,
+            _Reason) ->
     ets:delete(flow_table_ets(SwitchId, TableId), FlowId),
-    decrement_group_ref_count(SwitchId, Instructions),
     ?DEBUG("[FLOWMOD] Deleted flow entry with id ~w: ~w",
            [FlowId, Flow]),
     ok.
 
-send_flow_removed(SwitchId, TableId,
-                  #flow_entry{id = FlowId,
-                              cookie = Cookie,
-                              priority = Priority,
-                              install_time = InstallTime,
-                              match = Match},
-                  Reason) ->
-    DurationMs = timer:now_diff(os:timestamp(),InstallTime),
-
-    Body = #ofp_flow_removed{
-              cookie = Cookie,
-              priority =Priority,
-              reason = Reason,
-              table_id = TableId,
-              duration_sec = DurationMs div 1000000,
-              duration_nsec = DurationMs rem 1000000 * 1000,
-              match = Match},
-    Msg = #ofp_message{type = ofp_flow_removed,
-                       body = Body
-                      },
-    linc_logic:send_to_controllers(SwitchId, Msg).
-
--spec create_flow_entry(ofp_flow_mod()) -> #flow_entry{}.
-create_flow_entry(#ofp_flow_mod{priority = Priority,
+-spec create_flow_entry(datapath_id(), table_id(), ofp_flow_mod()) -> #flow_entry{}.
+create_flow_entry(DatapathId, TableId, #ofp_flow_mod{priority = Priority,
                                 cookie = Cookie,
                                 flags = Flags,
                                 match = Match,
                                 instructions = Instructions}) ->
-    #flow_entry{id = {Priority, make_ref()},
+    #flow_entry{id = make_ref(),
+                datapath_id = DatapathId,
+                table_id = TableId,
                 priority = Priority,
                 cookie = Cookie,
                 flags = Flags,
                 match = Match,
-                install_time = erlang:now(),
                 %% All record of type ofp_instruction() MUST have
                 %% seq number as a first element.
                 instructions = lists:keysort(2, Instructions)}.
 
-validate_match_and_instructions(SwitchId, TableId, Match, Instructions) ->
-    case validate_match(Match) of
-        ok ->
-            case validate_instructions(SwitchId, TableId,
-                                       Instructions, Match) of
-                ok ->
-                    ok;
-                Error ->
-                    Error
-            end;
-        Error ->
-            Error
-    end.
-
-%% Validate a match specification.
-%% This consists of
-%% - Are all fields supported
-%% - There are no duplicated fields
-%% - All prerequisite fields are present and with an apropiate value at an
-%%   earlier position in the list of fields
-%% - The values are within the allowed domains
-%% - There's no 0 bit in a mask for the corresponding bit in a value set to 1
--spec validate_match(Match::[ofp_field()]) ->
-                            ok | {error,{Type :: atom(), Code :: atom()}}.
-validate_match(Fields) ->
-    validate_match(Fields, []).
-
-validate_match([#ofp_field{class = Class, name = Name} = Field | Fields],
-               Previous) ->
-    Validators
-        = [{bad_field, fun is_supported_field/2, [Class, Name]},
-           {dup_field, fun is_not_duplicated_field/3, [Class, Name, Previous]},
-           {bad_prereq, fun are_prerequisites_met/2, [Field, Previous]},
-           {bad_value, fun is_value_valid/1, [Field]},
-           {bad_wildcards, fun is_mask_valid/1, [Field]}],
-
-    case lists:dropwhile(fun({_, CheckFun, Args}) ->
-                                 erlang:apply(CheckFun, Args)
-                         end, Validators) of
-        [] ->
-            validate_match(Fields, [Field | Previous]);
-        [{ErrorCode, _FaildedCheck, _} | _] ->
-            {error, {bad_match, ErrorCode}}
-    end;
-
-validate_match([],_Previous) ->
-    ok.
-
-%% Check that a field is supported.
-%% Currently all openflow_basic fields are assumed to be supported
-%% No experimenter fields are supported
-is_supported_field(openflow_basic,_Name) ->
-    true;
-is_supported_field(_Class, _Name) ->
-    false.
-
-%% Check that the field is not duplicated
-is_not_duplicated_field(Class, Name, Previous) ->
-    not([x] == [x|| #ofp_field{class=C,name=N} <- Previous, C==Class, N==Name]).
-
-%% Check that all prerequisite fields are present and have apropiate values
-are_prerequisites_met(#ofp_field{class=Class,name=Name},Previous) ->
-    case prerequisite_for(Class, Name) of
-        [] ->
-            true;
-        PreReqs ->
-            lists:any(fun (Required) ->
-                              test_prereq(Required,Previous)
-                      end, PreReqs)
-    end.
-
-%% Get the prerequisite fields and values for a field
-prerequisite_for(openflow_basic, in_phy_port) ->
-    [in_port];
-prerequisite_for(openflow_basic, vlan_pcp) ->
-    %% this needs work
-    [{{openflow_basic,vlan_vid},none}];
-prerequisite_for(openflow_basic, ip_dscp) ->
-    [{{openflow_basic,eth_type},<<16#800:16>>},
-     {{openflow_basic,eth_type},<<16#86dd:16>>}];
-prerequisite_for(openflow_basic, ip_ecn) ->
-    [{{openflow_basic,eth_type},<<16#800:16>>},
-     {{openflow_basic,eth_type},<<16#86dd:16>>}];
-prerequisite_for(openflow_basic, ip_proto) ->
-    [{{openflow_basic,eth_type},<<16#800:16>>},
-     {{openflow_basic,eth_type},<<16#86dd:16>>}];
-prerequisite_for(openflow_basic, ipv4_src) ->
-    [{{openflow_basic,eth_type},<<16#800:16>>}];
-prerequisite_for(openflow_basic, ipv4_dst) ->
-    [{{openflow_basic,eth_type},<<16#800:16>>}];
-prerequisite_for(openflow_basic, tcp_src) ->
-    [{{openflow_basic,ip_proto},<<6:8>>}];
-prerequisite_for(openflow_basic, tcp_dst) ->
-    [{{openflow_basic,ip_proto},<<6:8>>}];
-prerequisite_for(openflow_basic, udp_src) ->
-    [{{openflow_basic,ip_proto},<<17:8>>}];
-prerequisite_for(openflow_basic, udp_dst) ->
-    [{{openflow_basic,ip_proto},<<17:8>>}];
-prerequisite_for(openflow_basic, sctp_src) ->
-    [{{openflow_basic,ip_proto},<<132:8>>}];
-prerequisite_for(openflow_basic, sctp_dst) ->
-    [{{openflow_basic,ip_proto},<<132:8>>}];
-prerequisite_for(openflow_basic, icmpv4_type) ->
-    [{{openflow_basic,ip_proto},<<1:8>>}];
-prerequisite_for(openflow_basic, icmpv4_code) ->
-    [{{openflow_basic,ip_proto},<<1:8>>}];
-prerequisite_for(openflow_basic, arp_op) ->
-    [{{openflow_basic,eth_type},<<16#806:16>>}];
-prerequisite_for(openflow_basic, arp_spa) ->
-    [{{openflow_basic,eth_type},<<16#806:16>>}];
-prerequisite_for(openflow_basic, arp_tpa) ->
-    [{{openflow_basic,eth_type},<<16#806:16>>}];
-prerequisite_for(openflow_basic, arp_sha) ->
-    [{{openflow_basic,eth_type},<<16#806:16>>}];
-prerequisite_for(openflow_basic, arp_tha) ->
-    [{{openflow_basic,eth_type},<<16#806:16>>}];
-prerequisite_for(openflow_basic, ipv6_src) ->
-    [{{openflow_basic,eth_type},<<16#86dd:16>>}];
-prerequisite_for(openflow_basic, ipv6_dst) ->
-    [{{openflow_basic,eth_type},<<16#86dd:16>>}];
-prerequisite_for(openflow_basic, ipv6_flabel) ->
-    [{{openflow_basic,eth_type},<<16#86dd:16>>}];
-prerequisite_for(openflow_basic, icmpv6_type) ->
-    [{{openflow_basic,ip_proto},<<58:8>>}];
-prerequisite_for(openflow_basic, icmpv6_code) ->
-    [{{openflow_basic,ip_proto},<<58:8>>}];
-prerequisite_for(openflow_basic, ipv6_nd_target) ->
-    [{{openflow_basic,icmpv6_type},<<135:8>>},
-     {{openflow_basic,icmpv6_type},<<136:8>>}];
-prerequisite_for(openflow_basic, ipv6_nd_sll) ->
-    [{{openflow_basic,icmpv6_type},<<135:8>>}];
-prerequisite_for(openflow_basic, ipv6_nd_tll) ->
-    [{{openflow_basic,icmpv6_type},<<136:8>>}];
-prerequisite_for(openflow_basic, mpls_label) ->
-    [{{openflow_basic,eth_type},<<16#8847:16>>},
-     {{openflow_basic,eth_type},<<16#8848:16>>}];
-prerequisite_for(openflow_basic, mpls_tc) ->
-    [{{openflow_basic,eth_type},<<16#8847:16>>},
-     {{openflow_basic,eth_type},<<16#8848:16>>}];
-prerequisite_for(openflow_basic, mpls_bos) ->
-    [{{openflow_basic,eth_type},<<16#8847:16>>},
-     {{openflow_basic,eth_type},<<16#8848:16>>}];
-prerequisite_for(openflow_basic, pbb_isid) ->
-    [{{openflow_basic,eth_type},<<16#88E7:16>>}];
-prerequisite_for(openflow_basic, ipv6_exthdr) ->
-    [{{openflow_basic,eth_type},<<16#86dd:16>>}];
-prerequisite_for(openflow_basic, _) ->
-    [].
-
-test_prereq({{openflow_basic,vlan_pcp},_Value},Previous) ->
-    case lists:keyfind(vlan_pcp, #ofp_field.name,Previous) of
-        #ofp_field{value=Value} when Value/=none ->
-            true;
-        _ ->
-            false
-    end;
-test_prereq({{Class,Name},Value},Previous) ->
-    case [Field || #ofp_field{class=C,name=N}=Field <- Previous, C==Class, N==Name] of
-        [#ofp_field{value=Value}] ->
-            true;
-        _ ->
-            false
-    end;
-test_prereq(none, _Previous) ->
-    true.
-
-%% Validate instructions.
-%% unknown instruction
-%% unsupported instruction
-%% goto-table with invalid next-table-id
-%% invalid port
-%% invalid group
-%% invalid value in set-field
-%% operation inconsistent with match,
-validate_instructions(SwitchId, TableId, Instructions, Match) ->
-    case check_occurances(Instructions) of
-        ok ->
-            do_validate_instructions(SwitchId, TableId, Instructions, Match);
-        Error ->
-            Error
-    end.
-
-check_occurances(Instructions) ->
-    case lists:all(fun(Type) ->
-                           check_occurrences(Type, Instructions)
-                   end, ?INSTRUCTIONS) of
-        true ->
-            ok;
-        false ->
-            %% FIXME: The spec 1.2 does not specify an error for this case.
-            %% So for now we return this.
-            {error,{bad_instruction, unknown_inst}}
-    end.
-
-check_occurrences(ofp_instruction_goto_table, Instructions) ->
-    1 >= length([x || #ofp_instruction_goto_table{} <- Instructions]);
-check_occurrences(ofp_instruction_write_metadata, Instructions) ->
-    1 >= length([x || #ofp_instruction_write_metadata{} <- Instructions]);
-check_occurrences(ofp_instruction_write_actions, Instructions) ->
-    1 >= length([x || #ofp_instruction_write_actions{} <- Instructions]);
-check_occurrences(ofp_instruction_apply_actions, Instructions) ->
-    1 >= length([x || #ofp_instruction_apply_actions{} <- Instructions]);
-check_occurrences(ofp_instruction_clear_actions, Instructions) ->
-    1 >= length([x || #ofp_instruction_clear_actions{} <- Instructions]);
-check_occurrences(ofp_instruction_experimenter, Instructions) ->
-    1 >= length([x || #ofp_instruction_experimenter{} <- Instructions]).
-
-do_validate_instructions(SwitchId, TableId,
-                         [Instruction | Instructions], Match) ->
-    case validate_instruction(SwitchId, TableId, Instruction, Match) of
-        ok ->
-            do_validate_instructions(SwitchId, TableId, Instructions, Match);
-        Error ->
-            Error
-    end;
-do_validate_instructions(_SwitchId, _TableId, [], _Match) ->
-    ok.
-
-validate_instruction(SwitchId, _TableId,
-                     #ofp_instruction_meter{meter_id = MeterId}, _Match) ->
-    case linc_us4_meter:is_valid(SwitchId, MeterId) of
-        true ->
-            ok;
-        false ->
-            %% There is not suitable error code
-            {error,{bad_instruction,unsup_inst}}
-    end;
-validate_instruction(_SwitchId, TableId,
-                     #ofp_instruction_goto_table{table_id=NextTable}, _Match)
-  when is_integer(TableId), TableId < NextTable, TableId < ?OFPTT_MAX ->
-    ok;
-validate_instruction(_SwitchId, _TableId,
-                     #ofp_instruction_goto_table{}, _Match) ->
-    %% goto-table with invalid next-table-id
-    {error,{bad_action,bad_table_id}};
-validate_instruction(_SwitchId, _TableId,
-                     #ofp_instruction_write_metadata{}, _Match) ->
-    ok;
-validate_instruction(SwitchId, _TableId,
-                     #ofp_instruction_write_actions{actions = Actions},
-                     Match) ->
-    validate_actions(SwitchId, Actions, Match);
-validate_instruction(SwitchId, _TableId,
-                     #ofp_instruction_apply_actions{actions = Actions},
-                     Match) ->
-    validate_actions(SwitchId, Actions, Match);
-validate_instruction(_SwitchId, _TableId,
-                     #ofp_instruction_clear_actions{}, _Match) ->
-    ok;
-validate_instruction(_SwitchId, _TableId,
-                     #ofp_instruction_experimenter{}, _Match) ->
-    {error,{bad_instruction,unknown_inst}};
-validate_instruction(_SwitchId, _TableId, _Unknown, _Match) ->
-    %% unknown instruction
-    {error,{bad_instruction,unknown_inst}}.
-
-%% unsupported instruction {error,{bad_instruction,unsup_inst}},
-
-validate_actions(SwitchId, [Action|Actions], Match) ->
-    case validate_action(SwitchId, Action, Match) of
-        ok ->
-            validate_actions(SwitchId, Actions, Match);
-        Error ->
-            Error
-    end;
-validate_actions(_SwitchId, [], _Match) ->
-    ok.
-
-validate_action(_SwitchId,
-                #ofp_action_output{port=controller,max_len=MaxLen}, _Match) ->
-    %% no_buffer represents OFPCML_NO_BUFFER (0xFFFF)
-    case MaxLen /= no_buffer andalso MaxLen > ?OFPCML_MAX of
-        true ->
-            {error,{bad_action,bad_argument}};
-        false ->
-            ok
-    end;
-validate_action(SwitchId, #ofp_action_output{port=Port}, _Match) ->
-    case linc_us4_port:is_valid(SwitchId, Port) of
-        true ->
-            ok;
-        false ->
-            {error,{bad_action,bad_out_port}}
-    end;
-validate_action(SwitchId, #ofp_action_group{group_id=GroupId}, _Match) ->
-    case linc_us4_groups:is_valid(SwitchId, GroupId) of
-        true ->
-            ok;
-        false ->
-            {error,{bad_action,bad_out_group}}
-    end;
-validate_action(_SwitchId, #ofp_action_set_queue{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_set_mpls_ttl{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_dec_mpls_ttl{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_set_nw_ttl{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_dec_nw_ttl{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_copy_ttl_out{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_copy_ttl_in{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_push_vlan{ethertype=Ether}, _Match)
-  when Ether == 16#8100; Ether==16#88A8 ->
-    ok;
-validate_action(_SwitchId, #ofp_action_push_vlan{}, _Match) ->
-    {error,{bad_action,bad_argument}};
-validate_action(_SwitchId, #ofp_action_pop_vlan{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_push_mpls{ethertype=Ether}, _Match)
-  when Ether==16#8847; Ether==16#8848 ->
-    ok;
-validate_action(_SwitchId, #ofp_action_push_mpls{}, _Match) ->
-    {error,{bad_action,bad_argument}};
-validate_action(_SwitchId, #ofp_action_pop_mpls{}, _Match) ->
-    ok;
-validate_action(_SwitchId, #ofp_action_set_field{field=Field}, Match) ->
-    case are_prerequisites_met(Field,Match) of
-        true ->
-            ok;
-        false ->
-            {error,{bad_action,bad_argument}}
-    end;
-validate_action(_SwitchId, #ofp_action_experimenter{}, _Match) ->
-    {error,{bad_action,bad_type}}.
-
-%% Check that field value is in the allowed domain
-%% TODO
-is_value_valid(#ofp_field{name=_Name,value=_Value}) ->
-    true.
-
-%% @private Check that the mask is correct for the given value
-is_mask_valid(#ofp_field{has_mask = true, value = Value, mask = Mask}) ->
-    try is_mask_valid(Value, Mask) of
-        _ -> true
-    catch
-        throw:bad_mask ->
-            false
-    end;
-is_mask_valid(#ofp_field{has_mask = false}) ->
-    true.
-
-is_mask_valid(<<0:1, RestValue/bitstring>>, <<_:1, RestMask/bitstring>>) ->
-    is_mask_valid(RestValue, RestMask);
-is_mask_valid(<<1:1, RestValue/bitstring>>, <<1:1, RestMask/bitstring>>) ->
-    is_mask_valid(RestValue, RestMask);
-is_mask_valid(<<>>, <<>>) ->
-    true;
-is_mask_valid(_, _) ->
-    throw(bad_mask).
-
 %% Replace a flow with a new one, possibly keeping the counters
 %% from the old one. This is used when adding a flow with exactly
 %% the same match as an existing one.
-replace_existing_flow(SwitchId, TableId,
+replace_existing_flow(DatapathId, TableId,
                       #ofp_flow_mod{instructions=NewInstructions}=FlowMod,
                       #flow_entry{id=Id,instructions=PrevInstructions}=Existing,
                       Flags) ->
@@ -744,15 +267,15 @@ replace_existing_flow(SwitchId, TableId,
         true ->
             %% Reset flow counters
             %% Store new flow and remove the previous one
-            add_new_flow(SwitchId, TableId, FlowMod),
-            delete_flow(SwitchId, TableId, Existing, no_event);
+            add_new_flow(DatapathId, TableId, FlowMod),
+            delete_flow(DatapathId, TableId, Existing, no_event);
         false ->
             %% Do not reset the flow counters
             %% Just store the new flow with the previous FlowId
-            increment_group_ref_count(SwitchId, NewInstructions),
-            decrement_group_ref_count(SwitchId, PrevInstructions),
-            NewEntry = create_flow_entry(FlowMod),
-            ets:insert(flow_table_ets(SwitchId, TableId),
+            increment_group_ref_count(DatapathId, NewInstructions),
+            decrement_group_ref_count(DatapathId, PrevInstructions),
+            NewEntry = create_flow_entry(DatapathId, TableId, FlowMod),
+            ets:insert(flow_table_ets(DatapathId, TableId),
                        NewEntry#flow_entry{id=Id}),
             ?DEBUG("[FLOWMOD] Replaced flow entry ~w with: ~w",
                    [Id, NewEntry]),
@@ -762,7 +285,7 @@ replace_existing_flow(SwitchId, TableId,
 %% Modify an existing flow. This only modifies the instructions, leaving all other
 %% fields unchanged.
 modify_flow(SwitchId, TableId, #flow_entry{id=Id,instructions=PrevInstructions},
-            NewInstructions, Flags) ->
+            NewInstructions, _Flags) ->
     ets:update_element(flow_table_ets(SwitchId, TableId),
                        Id,
                        {#flow_entry.instructions, NewInstructions}),
@@ -776,11 +299,9 @@ modify_flow(SwitchId, TableId, #flow_entry{id=Id,instructions=PrevInstructions},
 
 get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
                Match, OutPort, OutGroup) ->
-    ets:foldl(fun (#flow_entry{id = FlowId,
-                               cookie = MyCookie,
+    ets:foldl(fun (#flow_entry{cookie = MyCookie,
                                flags = Flags,
                                priority = Priority,
-                               install_time = InstallTime,
                                match = MyMatch,
                                instructions = Instructions}=FlowEntry, Acc) ->
                       case cookie_match(MyCookie, Cookie, CookieMask)
@@ -790,11 +311,8 @@ get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
                                                        Instructions)
                       of
                           true ->
-                              DurationMs = timer:now_diff(os:timestamp(),InstallTime),
                               Stats = #ofp_flow_stats{
                                          table_id = TableId,
-                                         duration_sec = DurationMs div 1000000,
-                                         duration_nsec = DurationMs rem 1000000 * 1000,
                                          flags = Flags,
                                          priority = Priority,
                                          cookie = MyCookie,
@@ -810,34 +328,9 @@ get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
 %%============================================================================
 %% Various lookup functions
 
-get_flow(SwitchId, TableId, FlowId) ->
-    hd(ets:lookup(flow_table_ets(SwitchId, TableId), FlowId)).
-
-%% Get the match pattern from all flows with Priority.
-get_matches_by_priority(SwitchId, TableId, Priority) ->
-    Pattern = #flow_entry{id = {Priority,'_'},
-                          priority = Priority,
-                          match = #ofp_match{fields='$1'},
-                          _ = '_'
-                         },
-    [M || [M] <- ets:match(flow_table_ets(SwitchId, TableId), Pattern)].
-
 %% Find an existing flow with the same Priority and the exact same match expression.
--spec find_exact_match(integer(), ofp_table_id(),
-                       non_neg_integer(), ofp_match()) -> flow_id() | no_match.
-find_exact_match(SwitchId, TableId, Priority, Match) ->
-    Pattern = ets:fun2ms(fun (#flow_entry{id={Prio,_},
-                                          match=#ofp_match{fields=Fields}}=Flow)
-                               when Prio==Priority, Fields==Match ->
-                                 Flow
-                         end),
-    FlowTable = flow_table_ets(SwitchId, TableId),
-    case ets:select(FlowTable, Pattern) of
-        [Flow|_] =_Match->
-            Flow;
-        [] ->
-            no_match
-    end.
+find_exact_match(DatapathId, TableId, Priority, Match) ->
+    ofs_store_db:find_exact_match_flow(DatapathId, TableId, Priority, Match).
 
 %% Modify flows that are matching
 modify_matching_flows(SwitchId, TableId, Cookie, CookieMask,

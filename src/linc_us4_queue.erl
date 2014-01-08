@@ -46,6 +46,7 @@
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include("ofs_store_logger.hrl").
+-include("ofs_store.hrl").
 -include("linc_us4.hrl").
 -include("linc_us4_queue.hrl").
 

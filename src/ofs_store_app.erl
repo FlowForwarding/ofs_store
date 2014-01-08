@@ -32,6 +32,7 @@
 %% @doc Starts the application.
 -spec start(any(), any()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
+    ofs_store_db:install(),
     ofs_store_sup:start_link().
 
 %% @doc Stops the application.

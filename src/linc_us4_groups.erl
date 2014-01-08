@@ -31,6 +31,7 @@
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("ofs_store_logger.hrl").
+-include("ofs_store.hrl").
 -include("linc_us4.hrl").
 
 -type linc_bucket_id() :: {integer(), binary()}.

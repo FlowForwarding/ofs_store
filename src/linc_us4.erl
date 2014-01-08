@@ -52,12 +52,10 @@
 %%% main entry
 %%%-----------------------------------------------------------------------------
 
--spec handle_message(ofp_message_body(), state()) ->
-                            {noreply, state()} |
-                            {reply, ofp_message(), state()}.
-handle_message(MessageBody, State) ->
+-spec handle_message(datapath_id(), ofp_message_body()) -> ok.
+handle_message(DatapathId, MessageBody) ->
     MessageName = element(1, MessageBody),
-    erlang:apply(?MODULE, MessageName, [State, MessageBody]).
+    erlang:apply(?MODULE, MessageName, [DatapathId, MessageBody]).
 
 %%%-----------------------------------------------------------------------------
 %%% Handling of messages
