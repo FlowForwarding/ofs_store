@@ -35,6 +35,8 @@
          ofp_meter_mod/2,
          ofp_meter_config_request/2]).
 
+-define(V4, 4).
+
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("of_protocol/include/ofp_v4.hrl").
 -include("ofs_store.hrl").
@@ -139,12 +141,10 @@ ofp_queue_get_config_request(State,
     {reply, QueueConfigReply, State}.
 
 %% @doc Get flow entry statistics.
--spec ofp_flow_stats_request(state(), ofp_flow_stats_request()) ->
-                                    {reply, ofp_flow_stats_reply(), #state{}}.
-ofp_flow_stats_request(#state{switch_id = SwitchId} = State,
-                       #ofp_flow_stats_request{} = Request) ->
-    Reply = linc_us4_flow:get_stats(SwitchId, Request),
-    {reply, Reply, State}.
+-spec ofp_flow_stats_request(datapath_id(), ofp_flow_stats_request()) ->
+                                    ofp_message().
+ofp_flow_stats_request(DatapathId, #ofp_flow_stats_request{} = Request) ->
+    of_msg_lib:create_message(?V4, linc_us4_flow:get_stats(DatapathId, Request)).
 
 %% @doc Get port description.
 -spec ofp_port_desc_request(state(), ofp_port_desc_request()) ->

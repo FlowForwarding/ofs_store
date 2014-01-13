@@ -22,7 +22,7 @@
 -behaviour(gen_server).
 
 %% API
--export([update/1,
+-export([request/1,
          %% Backend general
          get_backend_flow_tables/1,
          %% Backend ports
@@ -69,8 +69,8 @@
 %% API functions
 %%------------------------------------------------------------------------------
 
-update(Request = #ofs_store_request{}) ->
-    gen_server:call(?MODULE, {update, Request}).
+request(Request = #ofs_store_request{}) ->
+    gen_server:call(?MODULE, {request, Request}).
 
 -spec get_backend_flow_tables(integer()) -> list(#flow_table{}).
 get_backend_flow_tables(SwitchId) ->
@@ -145,7 +145,7 @@ start_link() ->
 init([]) ->
     {ok, #state{}}.
 
-handle_call({update, Request}, _From, State) ->
+handle_call({request, Request}, _From, State) ->
     #ofs_store_request{datapath_id = DataPathId, message = Message} = Request,
     #ofp_message{version = Version, body = Body} = Message,
     ProtocolModule = protocol_module(Version),

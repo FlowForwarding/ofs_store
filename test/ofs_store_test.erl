@@ -26,17 +26,32 @@ cleanup(ok) ->
     stop_apps(),
     ok.
 
+-define(PRIORITY, 100).
+-define(TABLEID, 1).
+-define(INSTRUCTIONS, [{apply_actions, [{output, 2, 32768}]}]).
+
 create_flow() ->
+    ofs_store:clear(flow_entry),
     FlowAdd = of_msg_lib:flow_add(?VERSION,
                                     [{in_port, 1}],
-                                    [{apply_actions, [{output, 2, 32768}]}],
-                                    []),
+                                    ?INSTRUCTIONS,
+                                    [{priority, ?PRIORITY}, {table_id, ?TABLEID}]),
     Update = #ofs_store_request{
         datapath_id = ?DATAPATH_ID,
         message = FlowAdd
     },
-    ofs_store:update(Update),
-    ok.
+    ok = ofs_store:request(Update),
+    GetFlowStats = of_msg_lib:get_flow_statistics(?VERSION, all, [], []),
+    Get = #ofs_store_request{
+        datapath_id = ?DATAPATH_ID,
+        message = GetFlowStats
+    },
+    FlowStatsReply = ofs_store:request(Get),
+    {flow_stats_reply, _, ReplyBody} = of_msg_lib:decode(FlowStatsReply),
+    [Flow] = proplists:get_value(flows, ReplyBody),
+    ?assertEqual(?TABLEID, proplists:get_value(table_id, Flow)),
+    ?assertEqual(?PRIORITY, proplists:get_value(priority, Flow)),
+    ?assertEqual(?INSTRUCTIONS, proplists:get_value(instructions, Flow)).
 
 start_apps() ->
     error_logger:tty(false),

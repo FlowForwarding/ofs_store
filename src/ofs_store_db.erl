@@ -9,7 +9,10 @@
 
 -export([install/0,
          insert_flow_entry/1,
-         find_exact_match_flow/4
+         get_flow_entry/4,
+         get_flow_entries/2,
+         clear/1,
+         dump/1
         ]).
 
 install() ->
@@ -28,8 +31,8 @@ install() ->
 insert_flow_entry(FlowEntry) ->
     mnesia:dirty_write(FlowEntry).
 
--spec find_exact_match_flow(datapath_id(), table_id(), priority(), ofp_match()) -> flow_entry() | no_match.
-find_exact_match_flow(DatapathId, TableId, Priority, Match) ->
+-spec get_flow_entry(datapath_id(), table_id(), priority(), ofp_match()) -> flow_entry() | no_match.
+get_flow_entry(DatapathId, TableId, Priority, Match) ->
     Pattern = ets:fun2ms(fun (#flow_entry{datapath_id = Datap,
                                           table_id = Tabl,
                                           priority = Prio,
@@ -46,6 +49,24 @@ find_exact_match_flow(DatapathId, TableId, Priority, Match) ->
         [] ->
             no_match
     end.
+
+-spec get_flow_entries(datapath_id(), table_id()) -> [flow_entry()].
+get_flow_entries(DatapathId, TableId) ->
+    Pattern = ets:fun2ms(fun (#flow_entry{datapath_id = Datap,
+                                          table_id = Tabl} = Flow)
+                               when Datap==DatapathId, Tabl==TableId ->
+                                 Flow
+                         end),
+    mnesia:dirty_select(flow_entry, Pattern).
+
+%% debugging/testing functions
+clear(Table) ->
+    {atomic, ok} = mnesia:clear_table(Table).
+
+dump(Table) ->
+    Iterator = fun(R, L) -> [R | L] end,
+    Exec = fun({Fun, Tab}) -> mnesia:foldl(Fun, [], Tab) end,
+    mnesia:activity(transaction, Exec, [{Iterator, Table}]).
 
 %% Helper functions
 

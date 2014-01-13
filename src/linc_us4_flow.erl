@@ -172,26 +172,25 @@ clear_table_flows(SwitchId, TableId) ->
               end, ok, flow_table_ets(SwitchId, TableId)).
 
 %% @doc Get flow statistics.
--spec get_stats(integer(), #ofp_flow_stats_request{}) -> #ofp_flow_stats_reply{}.
-get_stats(SwitchId, #ofp_flow_stats_request{table_id = all,
+-spec get_stats(datapath_id(), #ofp_flow_stats_request{}) -> #ofp_flow_stats_reply{}.
+get_stats(DatapathId, #ofp_flow_stats_request{table_id = all,
                                             out_port = OutPort,
                                             out_group = OutGroup,
                                             cookie = Cookie,
                                             cookie_mask = CookieMask,
                                             match = #ofp_match{fields=Match}}) ->
-    Stats = [get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
+    Stats = [get_flow_stats(DatapathId, TableId, Cookie, CookieMask,
                             Match, OutPort,
                             OutGroup) || TableId <- lists:seq(0, ?OFPTT_MAX)],
     #ofp_flow_stats_reply{body = lists:concat(Stats)};
 
-get_stats(SwitchId, #ofp_flow_stats_request{table_id = TableId,
+get_stats(DatapathId, #ofp_flow_stats_request{table_id = TableId,
                                             out_port = OutPort,
                                             out_group = OutGroup,
                                             cookie = Cookie,
                                             cookie_mask = CookieMask,
                                             match = #ofp_match{fields=Match}}) ->
-    %%TODO
-    Stats = get_flow_stats(SwitchId, TableId,Cookie, CookieMask,
+    Stats = get_flow_stats(DatapathId, TableId, Cookie, CookieMask,
                            Match, OutPort, OutGroup),
     #ofp_flow_stats_reply{body = Stats}.
 
@@ -297,9 +296,9 @@ modify_flow(SwitchId, TableId, #flow_entry{id=Id,instructions=PrevInstructions},
 %%============================================================================
 %% Various counter functions
 
-get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
+get_flow_stats(DatapathId, TableId, Cookie, CookieMask,
                Match, OutPort, OutGroup) ->
-    ets:foldl(fun (#flow_entry{cookie = MyCookie,
+    lists:foldl(fun (#flow_entry{cookie = MyCookie,
                                flags = Flags,
                                priority = Priority,
                                match = MyMatch,
@@ -322,7 +321,7 @@ get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
                           false ->
                               Acc
                       end
-              end, [], flow_table_ets(SwitchId, TableId)).
+              end, [], ofs_store_db:get_flow_entries(DatapathId, TableId)).
 
 
 %%============================================================================
@@ -330,7 +329,24 @@ get_flow_stats(SwitchId, TableId, Cookie, CookieMask,
 
 %% Find an existing flow with the same Priority and the exact same match expression.
 find_exact_match(DatapathId, TableId, Priority, Match) ->
-    ofs_store_db:find_exact_match_flow(DatapathId, TableId, Priority, Match).
+        encode_flow_stats(ofs_store_db:get_flow_entry(DatapathId, TableId, Priority, Match)).
+
+encode_flow_stats(no_match) ->
+    no_match;
+encode_flow_stats(#flow_entry{
+                                table_id = TableId,
+                                cookie = Cookie,
+                                flags = Flags,
+                                priority = Priority,
+                                match = Match,
+                                instructions = Instructions}) ->
+    #ofp_flow_stats{
+        table_id = TableId,
+        flags = Flags,
+        priority = Priority,
+        cookie = Cookie,
+        match = Match,
+        instructions = Instructions}.
 
 %% Modify flows that are matching
 modify_matching_flows(SwitchId, TableId, Cookie, CookieMask,
