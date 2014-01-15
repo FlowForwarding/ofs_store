@@ -20,6 +20,7 @@
 -module(linc_us4_flow).
 
 % XXX may have lost idle time/hard timeout for flow
+% XXX should not use "|| Id <- lists:seq(0, ?OFPTT_MAX)]"
 
 %% API
 -export([initialize/0,
@@ -77,18 +78,18 @@ modify(DatapathId, #ofp_flow_mod{command = add,
                                table_id = TableId,
                                priority = Priority,
                                flags = Flags,
-                               match = #ofp_match{fields = Match}} = FlowMod) ->
+                               instructions = Instructions,
+                               match = Match} = FlowMod) ->
     case lists:member(check_overlap, Flags) of
         true ->
             add_new_flow(DatapathId, TableId, FlowMod);
         false ->
             %% Check if there is any entry with the exact same 
             %% priority and match
-            case find_exact_match(DatapathId, TableId,
-                                  Priority, Match) of
-                #flow_entry{} = Matching ->
-                    replace_existing_flow(DatapathId, TableId, FlowMod,
-                                          Matching, Flags);
+            case find_exact_match(DatapathId, TableId, Priority, Match) of
+                #flow_entry{} ->
+                    replace_existing_flow(DatapathId, TableId, Priority,
+                                          Match, Instructions);
                 no_match ->
                     add_new_flow(DatapathId, TableId, FlowMod)
             end
@@ -97,25 +98,17 @@ modify(DatapathId, #ofp_flow_mod{command = modify,
                                cookie = Cookie,
                                cookie_mask = CookieMask,
                                table_id = TableId,
-                               flags = Flags,
                                match = #ofp_match{fields = Match},
                                instructions = Instructions}) ->
     modify_matching_flows(DatapathId, TableId, Cookie, CookieMask,
-                                  Match, Instructions, Flags),
+                                  Match, Instructions),
     ok;
 modify(DatapathId, #ofp_flow_mod{command = modify_strict,
                                table_id = TableId,
                                priority = Priority,
-                               flags = Flags,
-                               match = #ofp_match{fields = Match},
+                               match = Match,
                                instructions = Instructions}) ->
-    case find_exact_match(DatapathId, TableId, Priority, Match) of
-        #flow_entry{} = Flow ->
-            modify_flow(DatapathId, TableId, Flow, Instructions, Flags);
-        no_match ->
-            %% Do nothing
-            ok
-    end;
+    replace_existing_flow(DatapathId, TableId, Priority, Match, Instructions);
 modify(DatapathId, #ofp_flow_mod{command = Cmd, table_id = all} = FlowMod)
   when Cmd == delete; Cmd == delete_strict ->
     [modify(DatapathId, FlowMod#ofp_flow_mod{table_id = Id})
@@ -224,10 +217,15 @@ flow_table_ets(SwitchId, TableId) ->
 %% Add a new flow entry.
 add_new_flow(DatapathId, TableId, FlowMod) ->
     NewEntry = create_flow_entry(DatapathId, TableId, FlowMod),
-    ofs_store_db:insert_flow_entry(NewEntry),
+    ok = ofs_store_db:insert_flow_entry(NewEntry),
     ?DEBUG("[FLOWMOD] Added new flow entry with id ~w: ~w",
            [NewEntry#flow_entry.id, FlowMod]),
     ok.
+
+%% Replace an existing flow
+replace_existing_flow(DatapathId, TableId, Priority, Match, Instructions) ->
+    ofs_store_db:update_flow_entry(DatapathId, TableId, Priority, Match,
+                                                                Instructions).
 
 %% Delete a flow
 delete_flow(SwitchId, TableId,
@@ -254,44 +252,6 @@ create_flow_entry(DatapathId, TableId, #ofp_flow_mod{priority = Priority,
                 %% All record of type ofp_instruction() MUST have
                 %% seq number as a first element.
                 instructions = lists:keysort(2, Instructions)}.
-
-%% Replace a flow with a new one, possibly keeping the counters
-%% from the old one. This is used when adding a flow with exactly
-%% the same match as an existing one.
-replace_existing_flow(DatapathId, TableId,
-                      #ofp_flow_mod{instructions=NewInstructions}=FlowMod,
-                      #flow_entry{id=Id,instructions=PrevInstructions}=Existing,
-                      Flags) ->
-    case lists:member(reset_counts, Flags) of
-        true ->
-            %% Reset flow counters
-            %% Store new flow and remove the previous one
-            add_new_flow(DatapathId, TableId, FlowMod),
-            delete_flow(DatapathId, TableId, Existing, no_event);
-        false ->
-            %% Do not reset the flow counters
-            %% Just store the new flow with the previous FlowId
-            increment_group_ref_count(DatapathId, NewInstructions),
-            decrement_group_ref_count(DatapathId, PrevInstructions),
-            NewEntry = create_flow_entry(DatapathId, TableId, FlowMod),
-            ets:insert(flow_table_ets(DatapathId, TableId),
-                       NewEntry#flow_entry{id=Id}),
-            ?DEBUG("[FLOWMOD] Replaced flow entry ~w with: ~w",
-                   [Id, NewEntry]),
-            ok
-    end.
-
-%% Modify an existing flow. This only modifies the instructions, leaving all other
-%% fields unchanged.
-modify_flow(SwitchId, TableId, #flow_entry{id=Id,instructions=PrevInstructions},
-            NewInstructions, _Flags) ->
-    ets:update_element(flow_table_ets(SwitchId, TableId),
-                       Id,
-                       {#flow_entry.instructions, NewInstructions}),
-    ?DEBUG("[FLOWMOD] New instructions for flow entry ~w: ~w",
-           [Id, NewInstructions]),
-    increment_group_ref_count(SwitchId, NewInstructions),
-    decrement_group_ref_count(SwitchId, PrevInstructions).
 
 %%============================================================================
 %% Various counter functions
@@ -327,40 +287,25 @@ get_flow_stats(DatapathId, TableId, Cookie, CookieMask,
 %%============================================================================
 %% Various lookup functions
 
-%% Find an existing flow with the same Priority and the exact same match expression.
+%% Find an existing flow with the same Priority and the exact
+%% same match expression.
 find_exact_match(DatapathId, TableId, Priority, Match) ->
-        encode_flow_stats(ofs_store_db:get_flow_entry(DatapathId, TableId, Priority, Match)).
-
-encode_flow_stats(no_match) ->
-    no_match;
-encode_flow_stats(#flow_entry{
-                                table_id = TableId,
-                                cookie = Cookie,
-                                flags = Flags,
-                                priority = Priority,
-                                match = Match,
-                                instructions = Instructions}) ->
-    #ofp_flow_stats{
-        table_id = TableId,
-        flags = Flags,
-        priority = Priority,
-        cookie = Cookie,
-        match = Match,
-        instructions = Instructions}.
+        ofs_store_db:get_flow_entry(DatapathId, TableId, Priority, Match).
 
 %% Modify flows that are matching
-modify_matching_flows(SwitchId, TableId, Cookie, CookieMask,
-                      Match, Instructions, Flags) ->
-    ets:foldl(fun (#flow_entry{cookie=MyCookie}=FlowEntry, Acc) ->
+modify_matching_flows(DatapathId, TableId, Cookie, CookieMask,
+                      Match, Instructions) ->
+    lists:foreach(fun (#flow_entry{cookie = MyCookie,
+                                   match = MyMatch,
+                                   priority = MyPriority} = FlowEntry) ->
                       case cookie_match(MyCookie, Cookie, CookieMask)
                           andalso non_strict_match(FlowEntry, Match) of
                           true ->
-                              modify_flow(SwitchId, TableId, FlowEntry,
-                                          Instructions, Flags);
+                              replace_existing_flow(DatapathId, TableId, MyPriority, MyMatch, Instructions);
                           false ->
-                              Acc
+                              do_nothing
                       end
-              end, [], flow_table_ets(SwitchId, TableId)).
+              end, ofs_store_db:get_flow_entries(DatapathId, TableId)).
 
 %% Delete flows that are matching 
 delete_matching_flows(SwitchId, TableId, Cookie, CookieMask,
@@ -481,29 +426,3 @@ delete_where_meter(SwitchId, MeterId, TableId) ->
 
 meter_match(MeterId, Instructions) ->
     [MeterId] == [Id || #ofp_instruction_meter{meter_id=Id} <- Instructions, Id==MeterId].
-
-increment_group_ref_count(SwitchId, Instructions) ->
-    update_group_ref_count(SwitchId, Instructions, 1).
-
-decrement_group_ref_count(SwitchId, Instructions) ->
-    update_group_ref_count(SwitchId, Instructions, -1).
-
-update_group_ref_count(SwitchId, Instructions, Incr) ->
-    [linc_us4_groups:update_reference_count(SwitchId, Group,Incr)
-     || Group <- get_groups(Instructions)].
-
-%% Find all groups reference from the Instructions
-get_groups(Instructions) ->
-    get_groups(Instructions, []).
-
-get_groups([#ofp_instruction_write_actions{actions=Actions}|Instructions], Acc) ->
-    get_groups(Instructions, Acc++get_groups_in_actions(Actions));
-get_groups([#ofp_instruction_apply_actions{actions=Actions}|Instructions], Acc) ->
-    get_groups(Instructions, Acc++get_groups_in_actions(Actions));
-get_groups([_|Instructions], Acc) ->
-    get_groups(Instructions, Acc);
-get_groups([], Acc) ->
-    Acc.
-
-get_groups_in_actions(Actions) ->
-    [Group||#ofp_action_group{group_id=Group} <- Actions].

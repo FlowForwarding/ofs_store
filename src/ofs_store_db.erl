@@ -9,6 +9,7 @@
 
 -export([install/0,
          insert_flow_entry/1,
+         update_flow_entry/5,
          get_flow_entry/4,
          get_flow_entries/2,
          clear/1,
@@ -28,19 +29,30 @@ install() ->
 
 %% insert new flow
 -spec insert_flow_entry(flow_entry()) -> ok.
-insert_flow_entry(FlowEntry) ->
-    mnesia:dirty_write(FlowEntry).
+insert_flow_entry(FlowEntry = #flow_entry{}) ->
+    mnesia:dirty_write(FlowEntry),
+    ok.
 
--spec get_flow_entry(datapath_id(), table_id(), priority(), ofp_match()) -> flow_entry() | no_match.
+-spec update_flow_entry(datapath_id(), table_id(), priority(), ofp_match(), [ofp_instruction()]) -> ok | no_match.
+update_flow_entry(DatapathId, TableId, Priority, #ofp_match{fields = Match}, NewInstructions) ->
+    case get_flow_entry(DatapathId, TableId, Priority, Match) of
+        no_match ->
+            no_match;
+        OldEntry ->
+            NewEntry = OldEntry#flow_entry{instructions = NewInstructions},
+            ok = insert_flow_entry(NewEntry)
+    end.
+
+-spec get_flow_entry(datapath_id(), table_id(), priority(), [ofp_field()]) -> flow_entry() | no_match.
 get_flow_entry(DatapathId, TableId, Priority, Match) ->
     Pattern = ets:fun2ms(fun (#flow_entry{datapath_id = Datap,
                                           table_id = Tabl,
                                           priority = Prio,
-                                          match=#ofp_match{fields=Fields}}=Flow)
-                               when Datap==DatapathId, 
-                                    Tabl==TableId, 
-                                    Prio==Priority, 
-                                    Fields==Match ->
+                                          match = #ofp_match{fields = Fields}} = Flow)
+                               when Datap == DatapathId, 
+                                    Tabl == TableId, 
+                                    Prio == Priority, 
+                                    Fields == Match ->
                                  Flow
                          end),
     case mnesia:dirty_select(flow_entry, Pattern) of

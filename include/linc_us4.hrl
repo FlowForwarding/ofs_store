@@ -147,6 +147,6 @@
           flags = []               :: [ofp_flow_mod_flag()],
           expires = {infinity,0,0} :: erlang:timestamp(),
           idle = {infinity,0,0}    :: erlang:timestamp(),
-          instructions = []        :: ordsets:ordset(ofp_instruction())
+          instructions = []        :: [ofp_instruction()]
          }).
 -type flow_entry() :: #flow_entry{}.

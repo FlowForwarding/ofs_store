@@ -69,18 +69,9 @@ ofp_flow_mod(DatapathId, FlowMod) ->
     linc_us4_flow:modify(DatapathId, FlowMod).
 
 %% @doc Modify flow table configuration.
--spec ofp_table_mod(state(), ofp_table_mod()) ->
-                           {noreply, #state{}} |
-                           {reply, ofp_message(), #state{}}.
-ofp_table_mod(State, #ofp_table_mod{} = TableMod) ->
-    case linc_us4_flow:table_mod(TableMod) of
-        ok ->
-            {noreply, State};
-        {error, {Type, Code}} ->
-            ErrorMsg = #ofp_error_msg{type = Type,
-                                      code = Code},
-            {reply, ErrorMsg, State}
-    end.
+-spec ofp_table_mod(datapath_id(), ofp_table_mod()) -> ok | {error, term()}.
+ofp_table_mod(DatapathId, #ofp_table_mod{} = TableMod) ->
+    linc_us4_flow:table_mod(TableMod).
 
 %% @doc Modify port configuration.
 -spec ofp_port_mod(state(), ofp_port_mod()) ->
