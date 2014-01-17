@@ -130,7 +130,7 @@ modify(DatapathId, #ofp_flow_mod{command = delete_strict,
                                 match = #ofp_match{fields = Match}}) ->
     case find_exact_match(DatapathId, TableId, Priority, Match) of
         #flow_entry{} = FlowEntry ->
-            delete_flow(DatapathId, TableId, FlowEntry, delete);
+            delete_flow(FlowEntry);
         _ ->
             %% Do nothing
             ok
@@ -161,7 +161,7 @@ delete_where_meter(SwitchId, MeterId) ->
 -spec clear_table_flows(integer(), 0..?OFPTT_MAX) -> ok.
 clear_table_flows(SwitchId, TableId) ->
     ets:foldl(fun(#flow_entry{} = FlowEntry, _Acc) ->
-                      delete_flow(SwitchId, TableId, FlowEntry, no_event)
+                      delete_flow(FlowEntry)
               end, ok, flow_table_ets(SwitchId, TableId)).
 
 %% @doc Get flow statistics.
@@ -228,13 +228,8 @@ replace_existing_flow(DatapathId, TableId, Priority, Match, Instructions) ->
                                                                 Instructions).
 
 %% Delete a flow
-delete_flow(SwitchId, TableId,
-            #flow_entry{id=FlowId}=Flow,
-            _Reason) ->
-    ets:delete(flow_table_ets(SwitchId, TableId), FlowId),
-    ?DEBUG("[FLOWMOD] Deleted flow entry with id ~w: ~w",
-           [FlowId, Flow]),
-    ok.
+delete_flow(#flow_entry{id = FlowId}) ->
+    ok = ofs_store_db:delete_flow_entry(FlowId).
 
 -spec create_flow_entry(datapath_id(), table_id(), ofp_flow_mod()) -> #flow_entry{}.
 create_flow_entry(DatapathId, TableId, #ofp_flow_mod{priority = Priority,
@@ -308,22 +303,22 @@ modify_matching_flows(DatapathId, TableId, Cookie, CookieMask,
               end, ofs_store_db:get_flow_entries(DatapathId, TableId)).
 
 %% Delete flows that are matching 
-delete_matching_flows(SwitchId, TableId, Cookie, CookieMask,
+delete_matching_flows(DatapathId, TableId, Cookie, CookieMask,
                       Match, OutPort, OutGroup) ->
-    ets:foldl(fun (#flow_entry{cookie=MyCookie,
-                               instructions=Instructions}=FlowEntry, Acc) ->
-                      case cookie_match(MyCookie, Cookie, CookieMask)
-                          andalso non_strict_match(FlowEntry, Match)
-                          andalso port_and_group_match(OutPort,
-                                                       OutGroup,
-                                                       Instructions)
-                      of
-                          true ->
-                              delete_flow(SwitchId, TableId, FlowEntry, delete);
-                          false ->
-                              Acc
+    lists:foreach(fun (#flow_entry{cookie = MyCookie,
+                               instructions = Instructions} = FlowEntry) ->
+                        case cookie_match(MyCookie, Cookie, CookieMask)
+                            andalso non_strict_match(FlowEntry, Match)
+                            andalso port_and_group_match(OutPort,
+                                                         OutGroup,
+                                                         Instructions)
+                        of
+                            true ->
+                                delete_flow(FlowEntry);
+                            false ->
+                                do_nothing
                       end
-              end, [], flow_table_ets(SwitchId, TableId)).
+                end, ofs_store_db:get_flow_entries(DatapathId, TableId)).
 
 non_strict_match(#flow_entry{match = #ofp_match{fields = EntryFields}},
                  FlowModFields) ->
@@ -405,8 +400,7 @@ delete_where_group(SwitchId, GroupId, TableId) ->
     ets:foldl(fun (#flow_entry{instructions=Instructions}=FlowEntry, Acc) ->
                       case port_and_group_match(any, GroupId, Instructions) of
                           true ->
-                              delete_flow(SwitchId, TableId,
-                                          FlowEntry, group_delete);
+                              delete_flow(FlowEntry);
                           false ->
                               Acc
                       end
@@ -417,8 +411,7 @@ delete_where_meter(SwitchId, MeterId, TableId) ->
     ets:foldl(fun (#flow_entry{instructions=Instructions}=FlowEntry, Acc) ->
                       case meter_match(MeterId, Instructions) of
                           true ->
-                              delete_flow(SwitchId, TableId,
-                                          FlowEntry, group_delete);
+                              delete_flow(FlowEntry);
                           false ->
                               Acc
                       end

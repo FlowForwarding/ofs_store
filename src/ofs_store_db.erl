@@ -10,6 +10,7 @@
 -export([install/0,
          insert_flow_entry/1,
          update_flow_entry/5,
+         delete_flow_entry/1,
          get_flow_entry/4,
          get_flow_entries/2,
          clear/1,
@@ -42,6 +43,10 @@ update_flow_entry(DatapathId, TableId, Priority, #ofp_match{fields = Match}, New
             NewEntry = OldEntry#flow_entry{instructions = NewInstructions},
             ok = insert_flow_entry(NewEntry)
     end.
+
+-spec delete_flow_entry(flow_id()) -> ok.
+delete_flow_entry(FlowId) ->
+    mnesia:dirty_delete(flow_entry, FlowId).
 
 -spec get_flow_entry(datapath_id(), table_id(), priority(), [ofp_field()]) -> flow_entry() | no_match.
 get_flow_entry(DatapathId, TableId, Priority, Match) ->

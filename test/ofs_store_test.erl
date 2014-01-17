@@ -58,6 +58,7 @@ modify_flow() ->
     InPort1 = 1,
     InPort2 = 2,
     InPort3 = 3,
+    OutPort3 = 13,
     Cookie1 = <<1:64>>,
     Cookie2 = <<3:64>>,
     Cookie3 = <<2:64>>,
@@ -66,9 +67,11 @@ modify_flow() ->
 
     Match1 = match(InPort1),
     Match2 = match(InPort2),
+    Match3 = match(InPort3),
+    Instructions3 = instructions(OutPort3),
     add_flow(InPort1, 10, Cookie1),
     add_flow(InPort2, 11, Cookie2),
-    add_flow(InPort3, 13, Cookie3),
+    add_flow(InPort3, OutPort3, Cookie3),
     NewInstructions = instructions(30),
     ModifyStrictFlow = of_msg_lib:flow_modify(?VERSION,
                                                 [],
@@ -78,10 +81,13 @@ modify_flow() ->
                                                  {priority, ?PRIORITY},
                                                  {table_id, ?TABLEID}]),
     ok = request(ModifyStrictFlow),
-    Flow1 = find_flow(?TABLEID, ?PRIORITY, Match1, get_flows()),
+    Flows = get_flows(),
+    Flow1 = find_flow(?TABLEID, ?PRIORITY, Match1, Flows),
     ?assertEqual(NewInstructions, proplists:get_value(instructions, Flow1)),
-    Flow2 = find_flow(?TABLEID, ?PRIORITY, Match2, get_flows()),
-    ?assertEqual(NewInstructions, proplists:get_value(instructions, Flow2)).
+    Flow2 = find_flow(?TABLEID, ?PRIORITY, Match2, Flows),
+    ?assertEqual(NewInstructions, proplists:get_value(instructions, Flow2)),
+    Flow3 = find_flow(?TABLEID, ?PRIORITY, Match3, Flows),
+    ?assertEqual(Instructions3, proplists:get_value(instructions, Flow3)).
 
 modify_strict_flow() ->
     ofs_store:clear(flow_entry),
@@ -101,13 +107,54 @@ modify_strict_flow() ->
     ?assertEqual(NewInstructions, proplists:get_value(instructions, Flow)).
 
 delete_flow() ->
-    ok.
+    ofs_store:clear(flow_entry),
+    InPort1 = 1,
+    InPort2 = 2,
+    InPort3 = 3,
+    OutPort1 = 10,
+    OutPort23 = 13,
+
+    Instructions1 = instructions(OutPort1),
+    add_flow(InPort1, OutPort1, ?COOKIE),
+    add_flow(InPort2, OutPort23, ?COOKIE),
+    add_flow(InPort3, OutPort23, ?COOKIE),
+    DeleteFlow = of_msg_lib:flow_delete(?VERSION,
+                                            [],
+                                            [{out_port, OutPort23},
+                                             {priority, ?PRIORITY},
+                                             {table_id, ?TABLEID}]),
+    ok = request(DeleteFlow),
+    [Flow] = get_flows(),
+    ?assertEqual(Instructions1, proplists:get_value(instructions, Flow)).
 
 delete_strict_flow() ->
-    ok.
+    ofs_store:clear(flow_entry),
+    InPort1 = 1,
+    InPort2 = 2,
+    OutPort2 = 20,
+    Match1 = match(InPort1),
+    Instructions2 = instructions(OutPort2),
+    add_flow(InPort1, 10, ?COOKIE),
+    add_flow(InPort2, OutPort2, ?COOKIE),
+    DeleteStrictFlow = of_msg_lib:flow_delete(?VERSION,
+                                                Match1,
+                                                [{priority, ?PRIORITY},
+                                                 {table_id, ?TABLEID},
+                                                 {strict, true}]),
+    ok = request(DeleteStrictFlow),
+    [Flow] = get_flows(),
+    ?assertEqual(Instructions2, proplists:get_value(instructions, Flow)).
 
 delete_all() ->
-    ok.
+    ofs_store:clear(flow_entry),
+    add_flow(1, 4, ?COOKIE),
+    add_flow(2, 4, ?COOKIE),
+    add_flow(3, 4, ?COOKIE),
+    DeleteFlow = of_msg_lib:flow_delete(?VERSION,
+                                            [],
+                                            [{table_id, all}]),
+    ok = request(DeleteFlow),
+    ?assertEqual([], get_flows()).
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -157,9 +204,6 @@ find_flow(TableId, Priority, Match, Flows) ->
     Flow.
 
 % Add a simple flow
-add_flow(InPort) ->
-    add_flow(InPort, ?OUTPORT, ?COOKIE).
-
 add_flow(InPort, OutPort, Cookie) ->
     FlowAdd = of_msg_lib:flow_add(?VERSION,
                                     match(InPort),
