@@ -1,5 +1,5 @@
 %%------------------------------------------------------------------------------
-%% Copyright 2012 FlowForwarding.org
+%% Copyright 2014 FlowForwarding.org
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -15,7 +15,8 @@
 %%-----------------------------------------------------------------------------
 
 %% @author Erlang Solutions Ltd. <openflow@erlang-solutions.com>
-%% @copyright 2012 FlowForwarding.org
+%% @copyright 2014 FlowForwarding.org
+
 %% @doc Module to represent OpenFlow port.
 %% It abstracts out underlying logic of either hardware network stack or virtual
 %% TAP stack. It provides Open Flow ports represented as gen_server processes
@@ -23,6 +24,7 @@
 %% It allows to create and attach queues to given ports and supports queue
 %% statistics as well. OpenFlow ports can be programatically started and
 %% stopped by utilizing API provided by this module.
+
 -module(linc_us4_port).
 
 % XXX no longer a gen_server -- need to rewrite this so port information is stored in a table.
