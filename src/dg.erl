@@ -1,68 +1,153 @@
 -module (dg).
+
 -compile(export_all).
+
 -include_lib("eunit/include/eunit.hrl").
 
--define(T,dgtbl).
--record(dg,{digraph}).
+-define(TV,dg_vertex).
+-define(TE,dg_edge).
 
-% @doc Creates the initial Dictionary and Directed graph
--spec init() -> {ok,{D :: dict(), G :: digraph()}}.
-init() ->
-    ?T=ets:new(?T, [set,public,named_table]),
-    ok.
+-record(dg,{v_tbl,      %% { VertexName, DigraphVertex, Labels }
+            e_tbl,      %% { EdgeName :: {VertexName1,VertexName2}, DigraphEdge, Labels } 
+            digraph}).
 
+-record(vertex,{name,vertex,labels}).
+-record(edge,{name,edge,labels}).
+
+% @doc Instantiates a new digraph and associated ETS table.
+-spec new() -> {ok,#dg{}}.
 new() ->
     G = digraph:new(),
-    #dg{ digraph = G }.
+    VTID=ets:new(?TV,[set,public]),
+    ETID=ets:new(?TE,[set,public]),
+    {ok,#dg{ v_tbl = VTID,
+             e_tbl = ETID,
+             digraph = G }}.
 
-% @doc add_vertex(G, Name) - add a vertex to the augmented digraph G called Name.
-% Note: this function won't rename the Key stored in dict.
-%% -spec add_vertex(D :: dict(), G :: digraph(), Name :: term()) -> {ok,D2 :: dict()}.
-add_vertex(G, VertexName) ->
-    ets_noexist(?T,VertexName,fun() ->
-        ['$v'|_] = Vertex = digraph:add_vertex(G),
-        true=ets:insert(?T,{VertexName,Vertex,[]})
+%% --- Vertices ------------------------------------------------------------------------------------------
+
+% @doc Calls ?MODULE:add_vertex/3
+-spec add_vertex(#dg{}, term()) -> true | error.
+add_vertex(DG, Name) ->
+    add_vertex(DG, Name,[]).
+
+
+% @doc Adds Name to ETS table TID, and creates a vertex on digraph G.
+-spec add_vertex(#dg{}, term(), list()) -> true | error.
+add_vertex(#dg{v_tbl = VTID, digraph = G} = _DG, Name, Labels) ->
+    V = digraph:add_vertex(G),
+    case ets:insert_new(VTID,{Name,V,Labels}) of
+        false -> true = digraph:del_vertex(G, V);
+        true  -> true
+    end.
+
+%% @doc Rename a vertex
+-spec rename_vertex(#dg{},term(),term()) -> true | error.
+rename_vertex(#dg{v_tbl = VTID} = _DG,Name,NewName) ->
+    ets_exist(VTID,Name,fun({ON,V_OR_E,Labels}) -> 
+        true = ets:insert(VTID,{NewName,V_OR_E,Labels}),
+        true = ets:delete(VTID, ON)
     end).
 
-%% @doc rename_vertex(OldName, NewName) - rename a vertex
--spec rename_vertex(OldVertexName :: term(), NewVertexName :: term()) -> error | {ok,D2 :: dict()}.
-rename_vertex(OldVertexName,NewVertexName) ->
-    ets_exist(?T,OldVertexName,fun({OVN,Vertex,Labels}) -> 
-        true = ets:insert(?T,{NewVertexName,Vertex,Labels}),
-        true = ets:delete(?T, OVN)
+% @doc Add a label to the dg Vertex ETS Entry, Can also be used to modify a label on a vertex.
+-spec add_vertex_label(#dg{},term(),term(),term()) -> true | error.
+add_vertex_label(#dg{v_tbl = VTID} = _DG,VertexName,Key,Value) ->
+    ets_exist(VTID,VertexName,fun({Name,Vertex,Labels}) ->
+        NewLabels=lists:append(proplists:delete(Key,Labels),[{Key,Value}]),
+        true = ets:insert(VTID,{Name,Vertex,NewLabels})
     end).
 
-% @doc add_edge(G, Name1, Name2) - create an edge between vertex Name1 and Name2
-% -spec add_edge(D :: dict(), G :: digraph(), VertexName1 :: term(), VertexName2 :: term()) -> ok | error | {error, any()}.
-add_edge(G,VertexName1,VertexName2) ->
-    ets_exist(?T,VertexName1,fun({_,Vertex1,_}) ->
-        ets_exist(?T,VertexName2,fun({_,Vertex2,_}) ->
-            ['$e'|_] = Edge = digraph:add_edge(G,Vertex1,Vertex2),
-            true
+% @doc Get a vertex's labels from TID in ETS
+-spec get_vertex_label(#dg{},term(),term()) -> list() | error.
+get_vertex_label(#dg{v_tbl = VTID} = _DG,VertexName, Key) ->
+    ets_exist(VTID,VertexName,fun({Name,_,Labels}) -> 
+        proplists:get_value(Key, Labels) 
+    end).
+
+
+% @doc Get all vertex Labels
+-spec get_vertex_labels(#dg{},term()) -> list() | error.
+get_vertex_labels(#dg{v_tbl = VTID} = _DG,VertexName) -> 
+    ets_exist(VTID,VertexName,fun({Name,_,Labels}) -> 
+        Labels 
+    end).
+
+% @doc Remove a label from a Vertex TID ETS entry.
+-spec remove_vertex_label(#dg{},term(),term()) -> true | error.
+remove_vertex_label(#dg{v_tbl = VTID} = _DG,VertexName, Key) ->
+    ets_exist(VTID,VertexName,fun({Name,Vertex,Labels}) -> 
+        true = ets:insert(VTID,{Name,Vertex,proplists:delete(Key, Labels)}) 
+    end).
+
+% @doc Remove a Vertex TID ETS entry, and remove vertex from digraph Graph, also remnoved Edges stored in ETID.
+-spec remove_vertex(#dg{},term()) -> true | error.
+remove_vertex(#dg{ v_tbl = VTID, e_tbl = ETID, digraph = G} = _DG,VertexName) ->
+    ets_exist(VTID,VertexName,fun({VN,V,L}) ->
+        FromList = ets:match(ETID, {{VertexName,'$1'},'_','_'}),
+        ToList   = ets:match(ETID, {{'$1',VertexName},'_','_'}),
+        [ true = ets:delete(ETID, {FromVertexName,VertexName}) || [FromVertexName] <- FromList ],
+        [ true = ets:delete(ETID, {ToVertexName,VertexName})   || [ToVertexName]   <- ToList ],
+        true = ets:delete(VTID, VertexName),
+        true = digraph:del_vertex(G, V) %% Digraph will delete the digraph edges...
+    end).
+
+%% --- Edges ---------------------------------------------------------------------------------------------
+
+% @doc calls add_edge/4 
+-spec add_edge(#dg{},term(),term()) -> true | error.
+add_edge(#dg{digraph = G} = _DG,FromVertexName,ToVertexName) ->
+    add_edge(#dg{digraph = G} = _DG,FromVertexName,ToVertexName,[]).
+
+% @doc Creates a Edge on ETID, and creates a edge on the Digraph G, and adds labels to ETS and digraph.
+-spec add_edge(#dg{},term(),term(),term()) -> true | error.
+add_edge(#dg{v_tbl = VTID, e_tbl = ETID, digraph = G} = _DG,FromVertexName,ToVertexName,Labels) ->
+    ets_exist(VTID,FromVertexName,fun({_,V1,_}) -> 
+        ets_exist(VTID,ToVertexName,fun({_,V2,_}) -> 
+            E = digraph:add_edge(G,V1,V2,Labels),
+            case ets:insert_new(ETID,{{FromVertexName,ToVertexName},E,Labels}) of
+                false -> true = digraph:del_edge(G, E);
+                true  -> true
+            end 
         end)
     end).
 
-% add_label(G, Name, Key, Value) - add Key, Value to the vertex
-add_label(G,VertexName,Key,Value) ->
-    ets_exist(?T,VertexName,fun({Name,Vertex,Labels}) ->
-        true=ets:update_element(?T,VertexName,{3,lists:append(Labels,[{Key,Value}])})
+% @doc Add a label to the digraph Edge in ETS and digraph, Can also be used to modify a label on a edge. Edge needs to exist in ETS.
+-spec add_edge_label(#dg{},term(),term(),term(),term()) -> true | error.
+add_edge_label(#dg{v_tbl = VTID, e_tbl = ETID, digraph = G} = _DG,FromVertexName,ToVertexName,Key,Value) ->
+    ets_exist(VTID,FromVertexName,fun({_,V1,_}) -> 
+        ets_exist(VTID,ToVertexName,fun({_,V2,_}) -> 
+            ets_exist(ETID,{FromVertexName,ToVertexName},fun({EName,E,Labels}) ->
+                NewLabels=lists:append(proplists:delete(Key,Labels),[{Key,Value}]),
+                true = ets:insert(ETID,{EName,E,NewLabels}),
+                E = digraph:add_edge(G, E, V1, V2, NewLabels),
+                true
+            end)
+        end)
     end).
 
-% remove_label(G, Name, Key)
-remove_label(G, VertexName, Key) ->
-    ets_exist(?T,VertexName,fun({Name,Vertex,Labels}) -> ets:insert(?T,{Name,Vertex,proplists:delete(Key, Labels)}) end).
+% @doc Get edge's labels from ETS
+-spec get_edge_label(#dg{},term(),term(),term()) -> true | error.
+get_edge_label(#dg{e_tbl = ETID} = DG,FromVertexName,ToVertexName,Key) ->
+    ets_exist(ETID,{FromVertexName,ToVertexName},fun({EName,E,Labels}) ->
+        proplists:get_value(Key, Labels) 
+    end).
 
-% get_label(G, Name, Key)
-get_label(G, VertexName, Key) ->
-    ets_exist(?T,VertexName,fun({Name,_,Labels}) -> proplists:get_value(Key, Labels, []) end).
+% @doc get all edge's labels.
+-spec get_edge_labels(#dg{},term(),term()) -> true | error.
+get_edge_labels(#dg{e_tbl = ETID} = DG,FromVertexName,ToVertexName) ->
+    ets_exist(ETID,{FromVertexName,ToVertexName},fun({EName,E,Labels}) ->
+        Labels
+    end).
 
+% @doc remove edge from ETS and digraph.
+-spec remove_edge(#dg{},term(),term()) -> true | error.
+remove_edge(#dg{e_tbl = ETID, digraph = G} = DG,FromVertexName,ToVertexName) ->
+    ets_exist(ETID,{FromVertexName,ToVertexName},fun({{VN1,VN2},E,_}) ->
+        true = ets:delete(ETID, {FromVertexName,ToVertexName}),
+        true = digraph:del_edge(G, E)
+    end).
 
-% get_labels(G, Name)
-get_labels(G, VertexName) -> 
-    ets_exist(?T,VertexName,fun({Name,_,Labels}) -> Labels end).
-
-
-%% ---- internal -------------------
+%% --- Internal ------------------------------------------------------------------------------------------
 
 ets_exist(Tbl,Key,Fun) ->
     case ets:lookup(Tbl,Key) of
@@ -80,125 +165,175 @@ ets_noexist(Tbl,Key,Fun) ->
 
 
 test() ->
-    try 
-        ets:delete(?T)
-    catch
-        C:E ->
-            error
-    end,
+    application:start(compiler),
+    application:start(syntax_tools),
+    application:start(lager),
+    application:start(mnesia),
+    application:start(ofs_store),
 
-    {ok,G} = init(),
-
-    true = add_vertex(G, VertexName1="Vertex1"),
-    true = add_vertex(G, VertexName2="Vertex2"),
-    true = add_vertex(G, VertexName3="Vertex3"),
-
-    true = rename_vertex(VertexName2,"NewVertexName2"),
-    add_label(G,"NewVertexName2","Key","Value"),
-    "Value" = get_label(G,"NewVertexName2","Key"),
-
-    add_label(G,VertexName1,"Key","Value"),
-    add_label(G,VertexName1,"Key2","Value2"),
-
-    "Value" = get_label(G,VertexName1,"Key"),
-    "Value2" = get_label(G,VertexName1,"Key2"),
-    error = get_label(G,"FakeVertexName","Key"),
-    [{"Key","Value"},{"Key2","Value2"}] = get_labels(G,VertexName1),
-
-    true = remove_label(G, VertexName1, "Key2"),
-    [{"Key","Value"}] = get_labels(G,VertexName1),
-
-    true = remove_label(G, VertexName1, "Key"),
-    [] = get_labels(G,VertexName1),
-
-    true = remove_label(G, VertexName1, "Key"),
-    [] = get_labels(G,VertexName1),
-
-    %% Edges:
-    true = add_edge(G,VertexName1,VertexName3),
-    error = add_edge(G,"FakeVertexName1","FakeVertexName2"),
-    [['$e'|0]] = digraph:edges(G).
-
-r() ->
+    {ok,DG}  = new(),
+    {ok,DG2} = new(),
+    #dg{ digraph = G ,v_tbl = VTID, e_tbl = ETID } = DG,
+    #dg{ digraph = G2 ,v_tbl = VTID2, e_tbl = ETID2 } = DG2,
     
-    %% Numbering on Edges and Vertices are 0 based. IE: [0,1,2,3,4] Total 5
+    ?assertEqual(true,add_vertex(DG, "Vertex0")),
+    ?assertEqual(true,add_vertex(DG, "Vertex1")),
+    ?assertEqual(true,add_vertex(DG, "Vertex2")),
 
-    %% Example directed graph used below:
-    %% http://www2.uwstout.edu/content/faculty/wuming/samples/gifFile/AdjM2.gif
+    ?assertEqual(true,add_vertex(DG2, "Vertex0")),
+    ?assertEqual(true,add_vertex(DG2, "Vertex1")),
+    ?assertEqual(true,add_vertex(DG2, "Vertex2")),
 
-    %% G = digraph:new(),
+    %% trying duplicate....
+    ?assertEqual(true,add_vertex(DG,"Vertex2")),
+    ?assertEqual(true,add_vertex(DG,"Vertex2")),
+    ?assertEqual(true,add_vertex(DG,"Vertex2")),
+    ?assertEqual(3,length(digraph:vertices(G))),
+    %% %% Instance 2 trying duplicate....
+    ?assertEqual(true,add_vertex(DG2,"Vertex2")),
+    ?assertEqual(true,add_vertex(DG2,"Vertex2")),
+    ?assertEqual(true,add_vertex(DG2,"Vertex2")),
+    ?assertEqual(3,length(digraph:vertices(G2))),
 
-    %% '$v'
-    % V0 = digraph:add_vertex(G),
-    % V1 = digraph:add_vertex(G),
-    % V2 = digraph:add_vertex(G),
-    % V3 = digraph:add_vertex(G),
-    % V4 = digraph:add_vertex(G),
+    %% Add vertex with label...
+    ?assertEqual(true,add_vertex(DG,"Vertex3",[{key,value}])),
+    [{_,DG_Vertex3,_}] = ets:lookup(VTID,"Vertex3"),
+    ?assertEqual([{"Vertex3",DG_Vertex3,[{key,value}]}],ets:lookup(VTID,"Vertex3")),
+    %% Instance 2 Add vertex with label...
+    ?assertEqual(true,add_vertex(DG2,"Vertex3",[{key,value}])),
+    [{_,DG2_Vertex3,_}] = ets:lookup(VTID,"Vertex3"),
+    ?assertEqual([{"Vertex3",DG2_Vertex3,[{key,value}]}],ets:lookup(VTID,"Vertex3")),
 
-    %% '$e'
-    % Edge0 = digraph:add_edge(G,V0,V1,"label_0_1"),
-    % Edge1 = digraph:add_edge(G,V0,V3,"label_0_3"),
-    % Edge2 = digraph:add_edge(G,V1,V2,"label_1_2"),
-    % Edge3 = digraph:add_edge(G,V1,V4,"label_1_4"),
-    % Edge4 = digraph:add_edge(G,V2,V4,"label_2_4"),
-    % Edge5 = digraph:add_edge(G,V3,V4,"label_3_4"),
+    %% Rename
+    ?assertEqual(true,rename_vertex(DG,"Vertex0","NewVertex0name")),
+    [{_,DG_Vertex0,_}] = ets:lookup(VTID,"NewVertex0name"),
+    ?assertEqual([{"NewVertex0name",DG_Vertex0,[]}],ets:lookup(VTID,"NewVertex0name")),
+    %% Instance 2 Rename
+    ?assertEqual(true,rename_vertex(DG2,"Vertex0","NewVertex0name")),
+    [{_,DG2_Vertex0,_}] = ets:lookup(VTID2,"NewVertex0name"),
+    ?assertEqual([{"NewVertex0name",DG2_Vertex0,[]}],ets:lookup(VTID2,"NewVertex0name")),
 
-    % digraph
+    %% Add label to NON-label vertex
+    ?assertEqual(true,add_vertex_label(DG,"Vertex1",key1,val1)),
+    ?assertEqual(val1,get_vertex_label(DG,"Vertex1",key1)),
 
-    % add_edge/5                    get_short_path/3
-    % add_edge/4                    in_degree/2
-    % add_edge/3                    in_edges/2
-    % add_vertex/3                  in_neighbours/2
-    % add_vertex/1                  info/1
-    % add_vertex/2                  module_info/0
-    % del_edge/2                    module_info/1
-    % del_edges/2                   new/1
-    % del_path/3                    new/0
-    % del_vertex/2                  no_edges/1
-    % del_vertices/2                no_vertices/1
-    % delete/1                      out_degree/2
-    % edge/2                        out_edges/2
-    % edges/1                       out_neighbours/2
-    % edges/2                       sink_vertices/1
-    % get_cycle/2                   source_vertices/1
-    % get_path/3                    vertex/2
-    % get_short_cycle/2             vertices/1
+    %% Instance 2 Add label to NON-label vertex
+    ?assertEqual(true,add_vertex_label(DG2,"Vertex1",key1,val1)),
+    ?assertEqual(val1,get_vertex_label(DG2,"Vertex1",key1)),
 
-    %% digraph:info(G),
-    %% digraph:no_edges(G).
-    %% digraph:no_vertices(G).
-    %% digraph:out_degree(G,V1).
-    %% digraph:out_edges(G,V1).
-    %% digraph:out_neighbours(G, V1).
-    %% digraph:vertices(G).
-    %% digraph:edges(G).
+    %% Add label to vertex with labels at create time.
+    ?assertEqual(true,add_vertex_label(DG,"Vertex3",key1,val1)),
+    ?assertEqual(value,get_vertex_label(DG,"Vertex3",key)),
+    ?assertEqual(val1,get_vertex_label(DG,"Vertex3",key1)),
+    ?assertEqual([{key,value},{key1,val1}],get_vertex_labels(DG,"Vertex3")),
 
-    % digraph_utils
+    %% Instance 2 Add label to vertex with labels at create time.
+    ?assertEqual(true,add_vertex_label(DG2,"Vertex3",key1,val1)),
+    ?assertEqual(value,get_vertex_label(DG2,"Vertex3",key)),
+    ?assertEqual(val1,get_vertex_label(DG2,"Vertex3",key1)),
+    ?assertEqual([{key,value},{key1,val1}],get_vertex_labels(DG2,"Vertex3")),
 
-    % arborescence_root/1           postorder/1
-    % components/1                  preorder/1
-    % condensation/1                reachable/2
-    % cyclic_strong_components/1    reachable_neighbours/2
-    % is_acyclic/1                  reaching/2
-    % is_arborescence/1             reaching_neighbours/2
-    % is_tree/1                     strong_components/1
-    % loop_vertices/1               subgraph/2
-    % module_info/0                 subgraph/3
-    % module_info/1                 topsort/1
+    %% modify vertex label key with diff value ...
+    ?assertEqual(true,add_vertex_label(DG,"Vertex3",key,changed)),
+    ?assertEqual([{key,changed},{key1,val1}],lists:sort(get_vertex_labels(DG,"Vertex3"))),
 
-    %% digraph_utils:arborescence_root(G).
-    %% digraph_utils:components(G).
-    %% digraph_utils:loop_vertices(G).
-    %% digraph_utils:postorder(G).
-    %% digraph_utils:reachable([V0], G).
-    %% digraph_utils:reaching([V0],G).
+    %% Instance 2 modify vertex label key with diff value ...
+    ?assertEqual(true,add_vertex_label(DG2,"Vertex3",key,changed)),
+    ?assertEqual([{key,changed},{key1,val1}],lists:sort(get_vertex_labels(DG2,"Vertex3"))),
 
-%%    digraph:edge(G, Edge0).
-ok.
+    % remove_vertex_label
+    ?assertEqual(true,remove_vertex_label(DG,"Vertex3",key)),
+    ?assertEqual([{key1,val1}],lists:sort(get_vertex_labels(DG,"Vertex3"))),
 
+    % Instance 2 remove_vertex_label
+    ?assertEqual(true,remove_vertex_label(DG2,"Vertex3",key)),
+    ?assertEqual([{key1,val1}],lists:sort(get_vertex_labels(DG2,"Vertex3"))),
 
+    %% Create edge
+    ?assertEqual(true,add_edge(DG,"Vertex1","Vertex2")),
+    [{_,Ea,_}] = ets:lookup(ETID,{"Vertex1","Vertex2"}),
+    ?assertEqual([{{"Vertex1","Vertex2"},Ea,[]}],ets:lookup(ETID,{"Vertex1","Vertex2"})),
+    ?assertEqual(1,length(digraph:edges(G))),
 
+    %% Instance 2 Create Edge
+    ?assertEqual(true,add_edge(DG2,"Vertex1","Vertex2")),
+    [{_,Ea2,_}] = ets:lookup(ETID2,{"Vertex1","Vertex2"}),
+    ?assertEqual([{{"Vertex1","Vertex2"},Ea,[]}],ets:lookup(ETID2,{"Vertex1","Vertex2"})),
+    ?assertEqual(1,length(digraph:edges(G2))),
 
+    %% Create edge with Label
+    ?assertEqual(true,add_edge(DG,"Vertex2","Vertex3",[{key,value}])),
+    [{_,Eb,_}] = ets:lookup(ETID,{"Vertex2","Vertex3"}),
+    ?assertEqual([{{"Vertex2","Vertex3"},Eb,[{key,value}]}],ets:lookup(ETID,{"Vertex2","Vertex3"})),
+    ?assertEqual(2,length(digraph:edges(G))),
 
+    %% Instance 2 Create edge with Label
+    ?assertEqual(true,add_edge(DG2,"Vertex2","Vertex3",[{key,value}])),
+    [{_,Eb2,_}] = ets:lookup(ETID2,{"Vertex2","Vertex3"}),
+    ?assertEqual([{{"Vertex2","Vertex3"},Eb,[{key,value}]}],ets:lookup(ETID2,{"Vertex2","Vertex3"})),
+    ?assertEqual(2,length(digraph:edges(G))),
 
+    %% Add & Modify edge label
+    ?assertEqual(true,add_vertex(DG,"Vertex888")),
+    ?assertEqual(true,add_vertex(DG,"Vertex999")),
+
+    ?assertEqual(true,add_edge(DG,"Vertex888","Vertex999",[{key8_9,value8_9}])),
+    [{_,Ec,_}] = ets:lookup(ETID,{"Vertex888","Vertex999"}),
+    ?assertEqual([{{"Vertex888","Vertex999"},Ec,[{key8_9,value8_9}]}],ets:lookup(ETID,{"Vertex888","Vertex999"})),
+    ?assertEqual(3,length(digraph:edges(G))),
+
+    ?assertEqual(true,add_edge_label(DG,"Vertex888","Vertex999",key8_9,some_new_value)),
+    ?assertEqual([{{"Vertex888","Vertex999"},Ec,[{key8_9,some_new_value}]}],ets:lookup(ETID,{"Vertex888","Vertex999"})),
+
+    ?assertEqual(some_new_value,get_edge_label(DG,"Vertex888","Vertex999",key8_9)),
+    ?assertEqual([{key8_9,some_new_value}],get_edge_labels(DG,"Vertex888","Vertex999")),
+
+    %% Removing Vertices:
+    ?assertEqual(true,add_vertex(DG,"VertexTEST")),
+    [{_,TESTVertex,_}] = ets:lookup(VTID,"VertexTEST"),
+    {TESTVertex,VertexLabel} = digraph:vertex(G, TESTVertex),
+    ?assertEqual(true,remove_vertex(DG,"VertexTEST")),
+    false = digraph:vertex(G, TESTVertex),
+
+    %% Removing Vertices with edges:
+    ?assertEqual(true,add_vertex(DG,"VertexTEST1")),
+    ?assertEqual(true,add_vertex(DG,"VertexTEST2")),
+    ?assertEqual(true,add_vertex(DG,"VertexTEST3")),
+    ?assertEqual(true,add_vertex(DG,"VertexTEST4")),
+
+    [{_,TESTVertex1,_}] = ets:lookup(VTID,"VertexTEST1"),
+    [{_,TESTVertex2,_}] = ets:lookup(VTID,"VertexTEST2"),
+    [{_,TESTVertex3,_}] = ets:lookup(VTID,"VertexTEST3"),
+    [{_,TESTVertex4,_}] = ets:lookup(VTID,"VertexTEST4"),
+
+    {TESTVertex1,VertexLabel1} = digraph:vertex(G, TESTVertex1),
+    {TESTVertex2,VertexLabel2} = digraph:vertex(G, TESTVertex2),
+    {TESTVertex3,VertexLabel3} = digraph:vertex(G, TESTVertex3),
+    {TESTVertex4,VertexLabel4} = digraph:vertex(G, TESTVertex4),
+
+    ?assertEqual(true,add_edge(DG,"VertexTEST1","VertexTEST2")),
+    ?assertEqual(true,add_edge(DG,"VertexTEST2","VertexTEST1")),
+    ?assertEqual(true,add_edge(DG,"VertexTEST3","VertexTEST2")),
+    %% No Edge for Test4
+    ?assertEqual(6,length(digraph:edges(G))),
+
+    ?assertEqual(true,remove_vertex(DG,"VertexTEST1")),
+    ?assertEqual(true,remove_vertex(DG,"VertexTEST2")),
+    ?assertEqual(3,length(digraph:edges(G))),
+
+    false = digraph:vertex(G, TESTVertex1),
+    false = digraph:vertex(G, TESTVertex2),
+    {TESTVertex3,VertexLabel3} = digraph:vertex(G, TESTVertex3),
+    {TESTVertex4,VertexLabel4} = digraph:vertex(G, TESTVertex4),
+
+    [] = ets:lookup(ETID,{"VertexTEST1","VertexTEST2"}),
+    [] = ets:lookup(ETID,{"VertexTEST2","VertexTEST1"}),
+    [] = ets:lookup(ETID,{"VertexTEST3","VertexTEST2"}),
+
+    %% CLEANUP
+    [ ets:delete(TBL) || TBL <- ets:all(), ( ets:info(TBL,name) == ?TV  ) or (  ets:info(TBL,name) == ?TE ) ],
+    ?assertEqual(true,digraph:delete(G)),
+    ?assertEqual(true,digraph:delete(G2)).
+
+    
 
