@@ -24,12 +24,20 @@
 -behaviour(application).
 
 %% Application callbacks
--export([start/2,
+-export([start/0,
+         start/2,
          stop/1]).
 
 %%------------------------------------------------------------------------------
 %% Application callbacks
 %%------------------------------------------------------------------------------
+
+start() ->
+    ok = application:start(syntax_tools),
+    ok = application:start(compiler), 
+    ok = application:start(lager), 
+    ok = application:start(mnesia),
+    ok = application:start(ofs_store).
 
 %% @doc Starts the application.
 -spec start(any(), any()) -> {ok, pid()}.
