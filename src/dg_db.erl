@@ -8,7 +8,7 @@
             tbl
            }).
 
-%% vertex { Name } <-> dg2_alias{ alias , Name }
+%% vertex { Name } <-> dg2_alias{ name , alias }
 
 new() ->
     new([]).
