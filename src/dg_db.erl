@@ -12,7 +12,7 @@
 
 new() ->
     new([]).
-
+  
 new(Type) ->
     G = digraph:new(Type),
     TID = ets:new(dg2_alias,[set,public]),
@@ -25,12 +25,12 @@ delete(#dg{ tbl = TID, digraph = G } = _DG) ->
 %% ----------------------------------------------------------------------------------------
 
 add_vertex(DG, Name) ->
-    add_vertex(DG, Name, undefined).
+    add_vertex(DG, Name, []).
 
-add_vertex(DG, Name, Alias) ->
-    add_vertex(DG, Name, Alias, []).
+add_vertex(DG, Name, Labels) ->
+    add_vertex(DG, Name, Labels, undefined).
 
-add_vertex(#dg{ digraph = G, tbl = TID } = _DG, Name, Alias, Labels) ->
+add_vertex(#dg{ digraph = G, tbl = TID } = _DG, Name, Labels, Alias) ->
     case digraph:add_vertex(G, Name, Labels) of
         Name  -> ets:insert_new(TID, {Name,Alias});
         false -> false
@@ -109,34 +109,59 @@ del_vertex(#dg{ digraph = G, tbl = TID } = _DG,Name) ->
         false -> false
     end.
 
+del_vertices(#dg{ digraph = G, tbl = TID } = _DG,Vertices) ->
+    case digraph:del_vertices(G, Vertices) of
+        true  -> 
+            ok = lists:foreach(fun(V) -> ets:delete(TID,V) end,Vertices),
+            true; 
+        false -> 
+            false
+    end.
+
+no_vertices(#dg{digraph = G} = _DG) ->
+    digraph:no_vertices(G).
+
 %% ----------------------------------------------------------------------------------------
 
 add_edge(DG, VertexName1, VertexName2) ->
-    add_edge(DG,VertexName1,VertexName2,undefined,[]).
+    add_edge(DG,VertexName1,VertexName2,[]).
 
-add_edge(DG, VertexName1, VertexName2, Alias) ->
-    add_edge(DG,VertexName1,VertexName2,Alias,[]).
-
-add_edge(#dg{ digraph = G, tbl = TID } = _DG, VertexName1, VertexName2, Alias, Labels) ->
+%% TODO: maybe get the edge if exists...
+add_edge(#dg{ digraph = G, tbl = TID } = _DG, VertexName1, VertexName2, Labels) ->
     case digraph:add_edge(G, VertexName1, VertexName2, Labels) of
         {error,Reason} -> {error,Reason};
         Edge           -> {ok,Edge}
     end.
 
-alter_edge(#dg{ digraph = _G, tbl = _TID } = _DG, _Edge, _VertexName1, _VertexName2, _Label) ->
-    ok.
+alter_edge(#dg{ digraph = G, tbl = _TID } = _DG, Edge, VertexName1, VertexName2, Labels) ->
+    case digraph:add_edge(G, Edge, VertexName1, VertexName2, Labels) of
+        {error,Reason} -> {error,Reason};
+        Edge           -> {ok,Edge}
+    end.        
 
+edge(#dg{digraph = G} = _DG, Edge) ->
+    digraph:edge(G,Edge).
+
+edges(#dg{digraph = G} = _DG) ->
+    digraph:edges(G).
+    
 edges(#dg{digraph = G} = _DG, VertexName) ->
     digraph:edges(G, VertexName).
 
-rename_edge() ->
-    ok.
+% rename_edge() ->
+%     ok.
 
 edit_edge_labels() ->
    ok.
 
-del_edge() ->
-    ok.
+del_edge(#dg{digraph = G} = _DG, Edge) ->
+    digraph:del_edge(G, Edge).
+
+del_edges(#dg{digraph = G} = _DG, Edges) ->
+    digraph:del_edges(G, Edges).
+
+no_edges(#dg{digraph = G} = _DG) -> 
+    digraph:no_edges(G).
 
 %% ----------------------------------------------------------------------------------------
  
