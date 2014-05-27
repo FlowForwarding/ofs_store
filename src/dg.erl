@@ -27,6 +27,21 @@
           del_edges/2
         ]).
 
+% Not yet implemented: ( In-Progress )
+
+% del_path
+% get_cycle
+% get_path
+% get_short_cycle
+% get_short_path
+% in_degree
+% in_edges
+% in_neighbours
+% info
+% out_degree
+% out_edges
+% out_neighbours
+
 -define(SERVER,dg_srv).  
 
 new() ->
