@@ -24,3 +24,5 @@
     datapath_id :: datapath_id(),
     message :: ofp_message()
 }).
+
+-define(APPS,[syntax_tools,compiler,lager,mnesia,crypto,ranch,cowlib,cowboy,jiffy,ofs_store]).

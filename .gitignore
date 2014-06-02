@@ -18,3 +18,4 @@
 *.plt
 erl_crash.dump
 *~
+Mnesia*

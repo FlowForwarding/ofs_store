@@ -23,7 +23,6 @@
 -include_lib("of_protocol/include/of_protocol.hrl").
 -include_lib("ofs_store/include/ofs_store.hrl").
 
--define(APPS, [compiler, syntax_tools, mnesia, xmerl, lager, ofs_store]).
 -define(V4, 4).
 -define(VERSION, ?V4).
 -define(DATAPATH_ID, {0,<<8,0,39,197,149,72>>}).
@@ -182,7 +181,12 @@ delete_all() ->
 
 start_apps() ->
     error_logger:tty(false),
-    [ok = application:start(A) || A <- ?APPS],
+    [ok = case application:start(A) of
+        {error,{already_started,_}} -> 
+            ok;
+        ok -> 
+            ok 
+        end || A <- ?APPS],
     ok = lager:set_loglevel(lager_console_backend, error).
 
 stop_apps() ->

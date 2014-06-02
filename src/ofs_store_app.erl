@@ -23,8 +23,11 @@
 
 -behaviour(application).
 
+-include_lib("of_protocol/include/of_protocol.hrl").
+-include_lib("ofs_store/include/ofs_store.hrl").
+
 %% Application callbacks
--export([start/0,
+-export([start_deps/0,
          start/2,
          stop/1]).
 
@@ -32,20 +35,41 @@
 %% Application callbacks
 %%------------------------------------------------------------------------------
 
-start() ->
-    ok = application:start(syntax_tools),
-    ok = application:start(compiler), 
-    ok = application:start(lager), 
-    ok = application:start(mnesia),
-    ok = application:start(ofs_store).
+start_deps() ->
+    [ok = application:start(A) || A <- ?APPS].
 
 %% @doc Starts the application.
 -spec start(any(), any()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
     ofs_store_db:install(),
+    {ok, _} = start_cowboy_http(),
     ofs_store_sup:start_link().
 
 %% @doc Stops the application.
 -spec stop(any()) -> ok.
 stop(_State) ->
     ok.
+
+
+start_cowboy_http() ->
+    Dispatch =
+    cowboy_router:compile([
+        {'_', [
+            {"/", ofs_store_rest_handler, []}
+        ]}
+    ]),
+    cowboy:start_http(http, 100, [{port, 8080}], [{env, [{dispatch, Dispatch}]}]).
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
