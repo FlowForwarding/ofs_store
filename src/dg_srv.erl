@@ -144,8 +144,10 @@ new_graph(TID,Name) ->
 new_graph(TID,Name,Type) ->
     {ok,DG} = dg_db:new(),
     Obj = {Name,DG},
-    true = ets:insert_new(TID,Obj),
-    {ok,Name}.
+    case ets:insert_new(TID,Obj) of
+        true  -> {ok,Name};
+        false -> {ok,Name}
+    end.
 
 graph_operation(TID,GraphName,F) ->
     case ets:lookup(TID,GraphName) of
