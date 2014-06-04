@@ -50,26 +50,13 @@ start(_StartType, _StartArgs) ->
 stop(_State) ->
     ok.
 
-
 start_cowboy_http() ->
     Dispatch =
     cowboy_router:compile([
         {'_', [
-            {"/", ofs_store_rest_handler, []}
+            {"/",                              ofs_store_rest_handler,     []},
+            {"/switches",                      ofs_store_switches_handler, []},
+            {"/switch/[:graph_name]/[:alias]", ofs_store_switch_handler,   []}
         ]}
     ]),
     cowboy:start_http(http, 100, [{port, 8080}], [{env, [{dispatch, Dispatch}]}]).
-    
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -10,6 +10,7 @@
           add_vertex/2,
           vertices/1,
           vertex/2,
+          vertex_alias/2,
           rename_vertex/3,
           set_vertex_alias/3,
           rename_vertex_alias/4,
@@ -44,14 +45,17 @@
 
 -define(SERVER,dg_srv).  
 
+% {ok,GraphName} / {error,reason}
 new() ->
-    {ok,GraphName} = gen_server:call(?SERVER,create_graph).
+    gen_server:call(?SERVER,create_graph).
 
+% {ok,GraphName} / {error,reason}
 new(Name) ->
-    {ok,GraphName} = gen_server:call(?SERVER,{create_graph,Name}).
+    gen_server:call(?SERVER,{create_graph,Name}).
 
+% {ok,GraphName} / {error,reason}
 new(Name,Type) ->
-    {ok,GraphName} = gen_server:call(?SERVER,{create_graph,Name,Type}).
+    gen_server:call(?SERVER,{create_graph,Name,Type}).
 
 del_graph(GraphName) ->
     gen_server:call(?SERVER,{del_graph,GraphName}).
@@ -65,14 +69,18 @@ rename_graph(OldName,NewName) ->
 %%-------------------------------------------------------------------------------------------------------------------------
 %% Vertices:
 
-add_vertex(Properties) when size(Properties) >=1; 
-                            size(Properties) =<3 ->
-    {ok,GraphName} = gen_server:call(?SERVER,create_graph),
-    true = add_vertex(GraphName,Properties),
-    {ok,GraphName}.
+add_vertex(Properties) when size(Properties) =:=1; 
+                            size(Properties) =:=3 ->
+    case gen_server:call(?SERVER,create_graph) of
+      {ok,GraphName} ->
+        true = add_vertex(GraphName,Properties),
+        {ok,GraphName};
+      false ->
+        false
+    end. 
 
-add_vertex(GraphName,Properties) when size(Properties) >=1; 
-                                      size(Properties) =<3 ->
+add_vertex(GraphName,Properties) when size(Properties) =:=1; 
+                                      size(Properties) =:=3 ->
     gen_server:call(?SERVER,{add_vertex,GraphName,Properties}).
 
 vertices(GraphName) ->
@@ -81,8 +89,8 @@ vertices(GraphName) ->
 vertex(GraphName,VertexName) ->
     gen_server:call(?SERVER,{vertex,GraphName,VertexName}).
 
-% vertex_alias(GraphName,VertexAlias) ->
-%     gen_server:call(?SERVER,{vertex_alias,GraphName,VertexAlias}).
+vertex_alias(GraphName,VertexAlias) ->
+    gen_server:call(?SERVER,{vertex_alias,GraphName,VertexAlias}).
 
 rename_vertex(GraphName,VertexName,NewVertexName) -> 
     gen_server:call(?SERVER,{rename_vertex,GraphName,VertexName,NewVertexName}).

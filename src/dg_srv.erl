@@ -18,9 +18,12 @@ init({}) ->
     {ok, #?STATE{tbl = TID}}.
 
 handle_call(create_graph,_From,#?STATE{ tbl = TID } = State) ->
-    Sec=calendar:datetime_to_gregorian_seconds(calendar:now_to_datetime(now())),
+    %% Sec=calendar:datetime_to_gregorian_seconds(calendar:now_to_datetime(now())),
+    {A,B,C}=now(),
+    random:seed(A,B,C),
+    R = random:uniform(99999999),
     {reply,
-        new_graph(TID,"graph_"++integer_to_list(Sec)),State};
+        new_graph(TID,"graph_"++integer_to_list(R)),State};
 handle_call({create_graph,Name},_From,#?STATE{ tbl = TID } = State) ->
     {reply,
         new_graph(TID,Name),State};
@@ -31,7 +34,6 @@ handle_call({add_vertex,GraphName,Properties}, _From, #?STATE{ tbl = TID } = Sta
     F = fun(DG) ->
             case Properties of
                 {VertexName}              -> dg_db:add_vertex(DG,VertexName);
-                {VertexName,Labels}       -> dg_db:add_vertex(DG,VertexName,Labels);
                 {VertexName,Labels,Alias} -> dg_db:add_vertex(DG,VertexName,Labels,Alias);
                 _                         -> error
             end
@@ -44,9 +46,9 @@ handle_call({vertices,GraphName},_From,#?STATE{ tbl = TID } = State) ->
 handle_call({vertex,GraphName,VertexName},_From,#?STATE{ tbl = TID } = State) ->
     {reply,
         graph_operation(TID,GraphName,fun(DG) -> dg_db:vertex(DG,VertexName) end),State};
-% handle_call({vertex_alias,GraphName,VertexAlias},_From,#?STATE{ tbl = TID } = State) ->
-%     {reply,
-%         graph_operation(TID,GraphName,fun(DG) -> dg_db:vertex_alias(DG,VertexAlias) end),State};
+handle_call({vertex_alias,GraphName,VertexAlias},_From,#?STATE{ tbl = TID } = State) ->
+    {reply,
+        graph_operation(TID,GraphName,fun(DG) -> dg_db:vertex_alias(DG,VertexAlias) end),State};
 handle_call({rename_vertex,GraphName,VertexName,NewVertexName},_From,#?STATE{ tbl = TID } = State) ->
     {reply,
         graph_operation(TID,GraphName,fun(DG) -> dg_db:rename_vertex(DG,VertexName,NewVertexName) end),State};
@@ -142,11 +144,18 @@ new_graph(TID,Name) ->
     new_graph(TID,Name,[]).
 
 new_graph(TID,Name,Type) ->
-    {ok,DG} = dg_db:new(),
-    Obj = {Name,DG},
-    case ets:insert_new(TID,Obj) of
-        true  -> {ok,Name};
-        false -> {ok,Name}
+    try 
+        {ok,DG} = dg_db:new(),
+        Obj = {Name,DG},
+        case ets:insert_new(TID,Obj) of
+            true  -> {ok,Name};
+            false -> {ok,Name}
+        end
+    catch 
+        {error,system_limit} ->
+            {error,system_limit}; 
+        C:E ->
+            {error,C,E}
     end.
 
 graph_operation(TID,GraphName,F) ->
