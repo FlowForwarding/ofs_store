@@ -42,21 +42,9 @@ start_deps() ->
 -spec start(any(), any()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
     ofs_store_db:install(),
-    {ok, _} = start_cowboy_http(),
     ofs_store_sup:start_link().
 
 %% @doc Stops the application.
 -spec stop(any()) -> ok.
 stop(_State) ->
     ok.
-
-start_cowboy_http() ->
-    Dispatch =
-    cowboy_router:compile([
-        {'_', [
-            {"/",                              ofs_store_rest_handler,     []},
-            {"/switches",                      ofs_store_switches_handler, []},
-            {"/switch/[:graph_name]/[:alias]", ofs_store_switch_handler,   []}
-        ]}
-    ]),
-    cowboy:start_http(http, 100, [{port, 8080}], [{env, [{dispatch, Dispatch}]}]).

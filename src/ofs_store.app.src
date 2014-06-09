@@ -23,11 +23,7 @@
   {applications, [kernel,
                   stdlib,
                   lager,
-                  mnesia,
-                  crypto,
-                  ranch,
-                  cowlib,
-                  cowboy
+                  mnesia
                  ]},
   {mod, {ofs_store_app, []}},
   {env, [{supported_versions, [4]}]}]}.
